@@ -17,6 +17,7 @@
 
   Serial: 9600 baud, line ending "Newline".
     #BIT=n      set bit time, 50..300 ms          (default 120)
+    #BEACON=ms  aim-the-camera blink, 0..15000 ms (default 4000)
     #ON         laser on, idle state
     #OFF        laser off
     #TEST       send "HELLO IOT"
@@ -50,6 +51,18 @@ const uint8_t  MAX_PAYLOAD = 60;
 const uint16_t PREAMBLE_ON_MS  = 500;
 const uint16_t PREAMBLE_OFF_MS = 500;
 
+/*
+  Beacon: a slow, obvious blink sent before the preamble of every message.
+
+  It gives whoever is holding the phone a few seconds to aim at the spot, and
+  it is what makes the receiver's automatic dot detection reliable - the
+  receiver looks for the part of the picture that is blinking, and nothing
+  else in a room blinks at 2.5 Hz. Each blink is far shorter than the
+  preamble guard, so the decoder can never mistake it for a frame start.
+*/
+const uint16_t BEACON_BLINK_MS = 200;
+const uint16_t MAX_BEACON_MS   = 15000;
+
 // ------------------------------------------------------------- sensor
 // CHANGE THIS LINE if the alert fires when you REMOVE the card instead of
 // when you insert it: swap LOW for HIGH.
@@ -62,6 +75,7 @@ const unsigned long SENSOR_DEBOUNCE_MS = 40UL;
 SoftwareSerial nodeSerial(PIN_NODE_RX, PIN_NODE_TX);
 
 uint16_t bitMs = 120;
+uint16_t beaconMs = 4000;
 bool laserIdleOn = true;
 bool sensorEnabled = true;
 
@@ -136,6 +150,18 @@ void sendMessage(const String &textIn) {
   if (crc < 16) Serial.print('0');
   Serial.println(crc, HEX);
 
+  // beacon: aim-the-camera time, and the receiver's acquisition signal
+  uint16_t cycles = beaconMs / (2 * BEACON_BLINK_MS);
+  if (cycles > 0) {
+    Serial.print(F("BEACON "));
+    Serial.print((unsigned long)cycles * 2 * BEACON_BLINK_MS);
+    Serial.println(F("ms"));
+    for (uint16_t i = 0; i < cycles; i++) {
+      hold(true,  BEACON_BLINK_MS);
+      hold(false, BEACON_BLINK_MS);
+    }
+  }
+
   // preamble
   hold(true,  PREAMBLE_ON_MS);
   hold(false, PREAMBLE_OFF_MS);
@@ -159,6 +185,8 @@ void sendMessage(const String &textIn) {
 void printStatus() {
   Serial.print(F("STATUS bit="));
   Serial.print(bitMs);
+  Serial.print(F("ms beacon="));
+  Serial.print(beaconMs);
   Serial.print(F("ms laser="));
   Serial.print(laserIdleOn ? F("ON") : F("OFF"));
   Serial.print(F(" sensor="));
@@ -180,6 +208,15 @@ bool handleCommand(const String &line) {
       Serial.println(bitMs);
     } else {
       Serial.println(F("ERR bit time must be 50..300"));
+    }
+  } else if (line.startsWith("#BEACON=")) {
+    long v = line.substring(8).toInt();
+    if (v >= 0 && v <= MAX_BEACON_MS) {
+      beaconMs = (uint16_t)v;
+      Serial.print(F("OK beacon="));
+      Serial.println(beaconMs);
+    } else {
+      Serial.println(F("ERR beacon must be 0..15000 ms"));
     }
   } else if (line == "#ON") {
     laserIdleOn = true;
@@ -273,7 +310,7 @@ void setup() {
   delay(200);
   Serial.println(F("LaserLink TX ready"));
   printStatus();
-  Serial.println(F("Commands: #BIT=n #ON #OFF #TEST #SENSOR=0/1 #STATUS"));
+  Serial.println(F("Commands: #BIT=n #BEACON=ms #ON #OFF #TEST #SENSOR=0/1 #STATUS"));
 }
 
 void loop() {

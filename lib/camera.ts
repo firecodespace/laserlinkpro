@@ -1,140 +1,300 @@
 /**
- * Camera front end: find the laser spot in the video, then turn each video
- * frame into a single ON/OFF decision for the decoder.
+ * Camera front end.
  *
- * The spot is small and the room is dim, so brightness is measured as the
- * mean of the brightest few pixels inside a small region of interest rather
- * than the mean of the whole region, which would wash the signal out.
+ * Two jobs, both automatic:
+ *
+ *  1. Find the laser spot. The naive way is "brightest pixel", which happily
+ *     locks onto a ceiling lamp or a reflection and never recovers. Instead
+ *     every block of the picture carries a slowly decaying min/max envelope,
+ *     and the spot is taken to be the block that is *changing* the most. A
+ *     lamp is bright but constant, so its envelope collapses and it scores
+ *     near zero. The laser blinks, so it wins. The beacon sent before each
+ *     message exists partly to make this unambiguous.
+ *
+ *  2. Turn each video frame into one ON/OFF decision, with an adaptive
+ *     threshold and hysteresis so slow drift in the room does not matter.
+ *
+ * Camera controls are tuned automatically where the browser exposes them:
+ * a short exposure keeps the room dark while the laser stays bright, which
+ * is exactly the contrast the decoder wants.
  */
+
+const W = 160;
+const H = 120;
+const BLOCK = 8;
+const COLS = W / BLOCK; // 20
+const ROWS = H / BLOCK; // 15
+
+/** How fast a block's min/max envelope relaxes back, per frame. */
+const LEAK = 0.7;
+/** A block must swing at least this much to count as "blinking". */
+const MIN_BLINK_AMP = 16;
+/** A rival block must beat the locked one by this factor to steal the lock. */
+const STEAL_FACTOR = 1.4;
+const HISTORY = 150;
 
 export type Roi = { cx: number; cy: number; r: number };
 
 export type SampleInfo = {
-  bright: number;
   level: 0 | 1;
+  peak: number;
   low: number;
   high: number;
   range: number;
+  /** Blink amplitude of the tracked block - the confidence of the lock. */
+  lockScore: number;
+  locked: boolean;
+  saturated: boolean;
 };
 
-const ANALYSIS_W = 192;
-const ANALYSIS_H = 144;
-const HISTORY = 150; // about 5 s at 30 fps
+type Range = { min: number; max: number; step?: number };
+type ExtendedCaps = MediaTrackCapabilities & {
+  exposureMode?: string[];
+  exposureTime?: Range;
+  exposureCompensation?: Range;
+  whiteBalanceMode?: string[];
+  focusMode?: string[];
+};
 
-export class SpotSampler {
-  roi: Roi = { cx: 0.5, cy: 0.5, r: 0.06 };
+/* ------------------------------------------------------------------ tuner */
+
+/**
+ * Drives whatever manual camera controls the browser exposes, then keeps
+ * nudging exposure so the laser spot stays bright without saturating.
+ */
+export class CameraTuner {
+  private track: MediaStreamTrack | null = null;
+  private caps: ExtendedCaps | null = null;
+  private exposureFrac = 0.12;
+  private lastNudge = 0;
+  notes: string[] = [];
+
+  async attach(track: MediaStreamTrack) {
+    this.track = track;
+    try {
+      this.caps = (track.getCapabilities?.() ?? null) as ExtendedCaps | null;
+    } catch {
+      this.caps = null;
+    }
+    await this.applyBaseline();
+  }
+
+  private async tryApply(c: Record<string, unknown>, label: string) {
+    if (!this.track) return false;
+    try {
+      await this.track.applyConstraints({
+        advanced: [c],
+      } as unknown as MediaTrackConstraints);
+      this.notes.push(label);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async applyBaseline() {
+    const caps = this.caps;
+    this.notes = [];
+    if (!caps) {
+      this.notes.push('no manual controls, using software threshold');
+      return;
+    }
+
+    // Stop the camera chasing the scene: a hunting auto-exposure turns a
+    // steady laser dot into a slowly fading one and ruins the bit decisions.
+    if (caps.exposureMode?.includes('manual') && caps.exposureTime) {
+      await this.setExposureFrac(this.exposureFrac);
+    } else if (caps.exposureCompensation) {
+      await this.tryApply(
+        { exposureCompensation: caps.exposureCompensation.min },
+        'exposure darkened',
+      );
+    }
+    if (caps.whiteBalanceMode?.includes('manual')) {
+      await this.tryApply({ whiteBalanceMode: 'manual' }, 'white balance locked');
+    }
+    if (caps.focusMode?.includes('continuous')) {
+      await this.tryApply({ focusMode: 'continuous' }, 'autofocus');
+    }
+    if (this.notes.length === 0) this.notes.push('software threshold only');
+  }
+
+  private async setExposureFrac(frac: number) {
+    const et = this.caps?.exposureTime;
+    if (!et) return false;
+    this.exposureFrac = Math.min(0.9, Math.max(0.02, frac));
+    const value = et.min + (et.max - et.min) * this.exposureFrac;
+    return this.tryApply({ exposureMode: 'manual', exposureTime: value }, 'exposure fixed');
+  }
+
+  get canAdjustExposure() {
+    return Boolean(this.caps?.exposureTime && this.caps?.exposureMode?.includes('manual'));
+  }
+
+  /**
+   * Called once per frame with the current peak. Acts at most twice a second
+   * and only at the extremes, so it never fights the decoder.
+   */
+  nudge(peak: number, now: number) {
+    if (!this.canAdjustExposure) return;
+    if (now - this.lastNudge < 1500) return;
+    if (peak > 250) {
+      this.lastNudge = now;
+      void this.setExposureFrac(this.exposureFrac * 0.7);
+    } else if (peak < 70) {
+      this.lastNudge = now;
+      void this.setExposureFrac(this.exposureFrac * 1.4);
+    }
+  }
+}
+
+/* ---------------------------------------------------------------- tracker */
+
+export class SpotTracker {
+  roi: Roi = { cx: 0.5, cy: 0.5, r: 0.07 };
+  lockScore = 0;
+
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
+  private bmin = new Float32Array(COLS * ROWS).fill(255);
+  private bmax = new Float32Array(COLS * ROWS).fill(0);
+  private peaks = new Float32Array(COLS * ROWS);
+  private seeded = false;
   private history: number[] = [];
   private level: 0 | 1 = 1;
+  private cx = W / 2;
+  private cy = H / 2;
 
   private ensure() {
     if (!this.canvas) {
       this.canvas = document.createElement('canvas');
-      this.canvas.width = ANALYSIS_W;
-      this.canvas.height = ANALYSIS_H;
+      this.canvas.width = W;
+      this.canvas.height = H;
       this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
     }
     return this.ctx;
   }
 
-  private grab(video: HTMLVideoElement): ImageData | null {
+  /** Forget everything and re-acquire from scratch. */
+  reset() {
+    this.bmin.fill(255);
+    this.bmax.fill(0);
+    this.history = [];
+    this.seeded = false;
+    this.lockScore = 0;
+  }
+
+  resetHistory() {
+    this.history = [];
+  }
+
+  sample(video: HTMLVideoElement): SampleInfo | null {
     const ctx = this.ensure();
     if (!ctx || video.videoWidth === 0) return null;
-    ctx.drawImage(video, 0, 0, ANALYSIS_W, ANALYSIS_H);
-    return ctx.getImageData(0, 0, ANALYSIS_W, ANALYSIS_H);
-  }
+    ctx.drawImage(video, 0, 0, W, H);
+    const d = ctx.getImageData(0, 0, W, H).data;
 
-  /** Point the region of interest at the brightest blob in the frame. */
-  findDot(video: HTMLVideoElement): Roi | null {
-    const img = this.grab(video);
-    if (!img) return null;
-    const d = img.data;
+    // ---- per block peak brightness, red weighted for a red laser ----------
+    this.peaks.fill(0);
+    for (let y = 0; y < H; y++) {
+      const brow = (y >> 3) * COLS;
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) << 2;
+        const v = d[i] * 0.6 + d[i + 1] * 0.2 + d[i + 2] * 0.2;
+        const b = brow + (x >> 3);
+        if (v > this.peaks[b]) this.peaks[b] = v;
+      }
+    }
+
+    // ---- update the blink envelopes --------------------------------------
+    if (!this.seeded) {
+      this.bmin.set(this.peaks);
+      this.bmax.set(this.peaks);
+      this.seeded = true;
+    } else {
+      for (let b = 0; b < this.peaks.length; b++) {
+        const v = this.peaks[b];
+        this.bmin[b] = Math.min(v, this.bmin[b] + LEAK);
+        this.bmax[b] = Math.max(v, this.bmax[b] - LEAK);
+      }
+    }
+
+    // ---- pick the block that is changing the most ------------------------
     let best = -1;
-    let bestI = 0;
-    for (let i = 0; i < d.length; i += 4) {
-      // The KY-008 is red, so weight red but keep the others for a blown-out
-      // white core.
-      const v = d[i] * 0.6 + d[i + 1] * 0.2 + d[i + 2] * 0.2;
-      if (v > best) {
-        best = v;
-        bestI = i >> 2;
+    let bestAmp = 0;
+    for (let b = 0; b < this.peaks.length; b++) {
+      const amp = this.bmax[b] - this.bmin[b];
+      if (amp > bestAmp) {
+        bestAmp = amp;
+        best = b;
       }
     }
-    if (best < 40) return null;
 
-    // Centroid of everything near that peak, so a slightly smeared dot still
-    // lands the region of interest in the middle.
-    const thr = best - 35;
-    let sx = 0;
-    let sy = 0;
-    let n = 0;
-    for (let i = 0; i < d.length; i += 4) {
-      const v = d[i] * 0.6 + d[i + 1] * 0.2 + d[i + 2] * 0.2;
-      if (v >= thr) {
-        const p = i >> 2;
-        sx += p % ANALYSIS_W;
-        sy += Math.floor(p / ANALYSIS_W);
-        n++;
+    const curBlock = (Math.floor(this.cy) >> 3) * COLS + (Math.floor(this.cx) >> 3);
+    const curAmp = this.bmax[curBlock] - this.bmin[curBlock];
+    const haveLock = curAmp >= MIN_BLINK_AMP;
+
+    if (best >= 0 && bestAmp >= MIN_BLINK_AMP) {
+      if (!haveLock || bestAmp > curAmp * STEAL_FACTOR) {
+        this.cx = ((best % COLS) + 0.5) * BLOCK;
+        this.cy = (Math.floor(best / COLS) + 0.5) * BLOCK;
+        this.history = [];
       }
     }
-    if (n === 0) {
-      sx = bestI % ANALYSIS_W;
-      sy = Math.floor(bestI / ANALYSIS_W);
-      n = 1;
-    }
-    this.roi = { cx: sx / n / ANALYSIS_W, cy: sy / n / ANALYSIS_H, r: 0.07 };
-    this.history = [];
-    return this.roi;
-  }
+    this.lockScore = Math.max(curAmp, haveLock ? curAmp : bestAmp);
 
-  /** One frame -> one ON/OFF decision, with hysteresis around the midpoint. */
-  sample(video: HTMLVideoElement): SampleInfo | null {
-    const img = this.grab(video);
-    if (!img) return null;
-    const d = img.data;
-
-    const cx = Math.round(this.roi.cx * ANALYSIS_W);
-    const cy = Math.round(this.roi.cy * ANALYSIS_H);
-    const rad = Math.max(2, Math.round(this.roi.r * ANALYSIS_W));
-    const vals: number[] = [];
-    for (let y = cy - rad; y <= cy + rad; y++) {
-      if (y < 0 || y >= ANALYSIS_H) continue;
-      for (let x = cx - rad; x <= cx + rad; x++) {
-        if (x < 0 || x >= ANALYSIS_W) continue;
-        const i = (y * ANALYSIS_W + x) * 4;
-        vals.push(d[i] * 0.6 + d[i + 1] * 0.2 + d[i + 2] * 0.2);
+    // ---- measure: brightest pixel near the tracked centre -----------------
+    const R = 7;
+    let peak = 0;
+    let px = this.cx;
+    let py = this.cy;
+    const x0 = Math.max(0, Math.round(this.cx) - R);
+    const x1 = Math.min(W - 1, Math.round(this.cx) + R);
+    const y0 = Math.max(0, Math.round(this.cy) - R);
+    const y1 = Math.min(H - 1, Math.round(this.cy) + R);
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const i = (y * W + x) << 2;
+        const v = d[i] * 0.6 + d[i + 1] * 0.2 + d[i + 2] * 0.2;
+        if (v > peak) {
+          peak = v;
+          px = x;
+          py = y;
+        }
       }
     }
-    if (vals.length === 0) return null;
-    vals.sort((a, b) => b - a);
-    const topN = Math.max(3, Math.round(vals.length * 0.08));
-    let sum = 0;
-    for (let i = 0; i < topN; i++) sum += vals[i];
-    const bright = sum / topN;
 
-    this.history.push(bright);
+    this.history.push(peak);
     if (this.history.length > HISTORY) this.history.shift();
-
     const sorted = [...this.history].sort((a, b) => a - b);
-    const low = sorted[Math.floor(sorted.length * 0.1)];
-    const high = sorted[Math.floor(sorted.length * 0.9)];
+    const low = sorted[Math.floor(sorted.length * 0.1)] ?? 0;
+    const high = sorted[Math.floor(sorted.length * 0.9)] ?? 0;
     const range = high - low;
 
     if (range >= 12) {
       const hi = low + range * 0.6;
       const lo = low + range * 0.4;
-      if (bright >= hi) this.level = 1;
-      else if (bright <= lo) this.level = 0;
-    } else {
-      // Not enough contrast yet to call it - hold at idle.
-      this.level = bright > (low + high) / 2 ? 1 : this.level;
+      if (peak >= hi) this.level = 1;
+      else if (peak <= lo) this.level = 0;
+      // Creep the centre toward the hot pixel only while the beam is on,
+      // so a dim frame cannot drag the window onto background noise.
+      if (this.level === 1) {
+        this.cx += (px - this.cx) * 0.15;
+        this.cy += (py - this.cy) * 0.15;
+      }
     }
 
-    return { bright, level: this.level, low, high, range };
-  }
+    this.roi = { cx: this.cx / W, cy: this.cy / H, r: 0.075 };
 
-  resetHistory() {
-    this.history = [];
+    return {
+      level: this.level,
+      peak,
+      low,
+      high,
+      range,
+      lockScore: this.lockScore,
+      locked: this.lockScore >= MIN_BLINK_AMP && range >= 12,
+      saturated: peak > 250,
+    };
   }
 }

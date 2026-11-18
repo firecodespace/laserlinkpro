@@ -3,34 +3,29 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
-const TABS = [
-  { href: '/', label: 'Overview' },
-  { href: '/chat/', label: 'Chat' },
-  { href: '/transmit/', label: 'Transmit' },
-  { href: '/receive/', label: 'Receive' },
-  { href: '/protocol/', label: 'Protocol' },
-];
-
 export function Nav() {
   const path = usePathname() || '/';
-  const norm = path.endsWith('/') ? path : path + '/';
+  const atRoot = path === '/' || path === '';
   return (
     <header className="topbar">
       <div className="topbar-inner">
-        <div className="brand">
+        <Link
+          href="/"
+          className="brand"
+          style={{ textDecoration: 'none', color: 'inherit' }}
+        >
           <span className="brand-dot" />
           <span>
             LaserLink
-            <small>Phase-0 optical link</small>
+            <small>optical link</small>
           </span>
-        </div>
-        <nav className="tabs">
-          {TABS.map((t) => (
-            <Link key={t.href} href={t.href} data-active={norm === t.href}>
-              {t.label}
-            </Link>
-          ))}
-        </nav>
+        </Link>
+        <span className="spacer" />
+        {!atRoot && (
+          <Link className="linkBtn" href="/">
+            Switch role
+          </Link>
+        )}
       </div>
     </header>
   );

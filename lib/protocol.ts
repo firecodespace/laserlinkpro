@@ -25,6 +25,22 @@ export const MAX_PAYLOAD = 60;
 export const PREAMBLE_ON_MS = 500;
 export const PREAMBLE_OFF_MS = 500;
 
+/**
+ * Beacon: a slow, obvious blink sent before the preamble.
+ *
+ * It buys the person holding the phone a few seconds to aim at the spot, and
+ * it is also what makes automatic dot detection work - the receiver looks for
+ * the part of the picture that is *blinking*, which a lamp or a reflection
+ * never does. 200 ms half cycles give about six video frames per state at
+ * 30 fps, which is plenty to measure.
+ *
+ * Each blink is far shorter than the preamble guard, so the decoder can never
+ * mistake the beacon for the start of a frame.
+ */
+export const BEACON_BLINK_MS = 200;
+export const DEFAULT_BEACON_MS = 4000;
+export const MAX_BEACON_MS = 15000;
+
 /** Length of the guard ON period that ends the preamble. */
 export function guardMs(bitMs: number): number {
   return Math.max(1000, 12 * bitMs);
@@ -79,12 +95,19 @@ export function byteToBits(b: number): (0 | 1)[] {
  * Full light waveform for one frame, preamble included, as timed segments.
  * Used for the waveform preview and the no-hardware self test.
  */
-export function frameToSegments(frame: number[], bitMs: number): Segment[] {
-  const segs: Segment[] = [
-    { v: 1, ms: PREAMBLE_ON_MS },
-    { v: 0, ms: PREAMBLE_OFF_MS },
-    { v: 1, ms: guardMs(bitMs) },
-  ];
+export function frameToSegments(frame: number[], bitMs: number, beaconMs = 0): Segment[] {
+  const segs: Segment[] = [];
+
+  // Beacon first, ending on OFF so it cannot merge into the preamble's ON.
+  const cycles = Math.floor(beaconMs / (2 * BEACON_BLINK_MS));
+  for (let i = 0; i < cycles; i++) {
+    segs.push({ v: 1, ms: BEACON_BLINK_MS });
+    segs.push({ v: 0, ms: BEACON_BLINK_MS });
+  }
+
+  segs.push({ v: 1, ms: PREAMBLE_ON_MS });
+  segs.push({ v: 0, ms: PREAMBLE_OFF_MS });
+  segs.push({ v: 1, ms: guardMs(bitMs) });
   for (const b of frame) {
     for (const bit of byteToBits(b)) segs.push({ v: bit, ms: bitMs });
   }
@@ -100,8 +123,13 @@ export function frameToSegments(frame: number[], bitMs: number): Segment[] {
 }
 
 /** Wall-clock duration of one message, so the UI can show a countdown. */
-export function frameDurationMs(frame: number[], bitMs: number): number {
-  return frameToSegments(frame, bitMs).reduce((a, s) => a + s.ms, 0);
+export function frameDurationMs(frame: number[], bitMs: number, beaconMs = 0): number {
+  return frameToSegments(frame, bitMs, beaconMs).reduce((a, s) => a + s.ms, 0);
+}
+
+/** Whole beacon cycles actually sent, rounded the same way the Uno rounds. */
+export function effectiveBeaconMs(beaconMs: number): number {
+  return Math.floor(beaconMs / (2 * BEACON_BLINK_MS)) * 2 * BEACON_BLINK_MS;
 }
 
 export type ParsedFrame = {

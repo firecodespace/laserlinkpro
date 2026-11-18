@@ -46,9 +46,9 @@ export function segmentsToSamples(
 export function selfTest(
   text: string,
   bitMs: number,
-  opts: SimOptions = {},
+  opts: SimOptions & { beaconMs?: number } = {},
 ): DecodeEvent[] {
-  const segs = frameToSegments(buildFrame(text), bitMs);
+  const segs = frameToSegments(buildFrame(text), bitMs, opts.beaconMs ?? 0);
   const samples = segmentsToSamples(segs, opts);
   const dec = new LaserDecoder(bitMs);
   const events: DecodeEvent[] = [];

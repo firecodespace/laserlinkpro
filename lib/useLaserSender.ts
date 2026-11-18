@@ -1,38 +1,48 @@
 'use client';
 
 /**
- * Sender side of the chat: owns the outgoing queue and the two ways of
- * reaching the Uno.
+ * Sender side: owns the outgoing queue and the link to the Uno.
  *
- *   usb   browser -> Web Serial -> Uno            (works on https and localhost)
- *   wifi  browser -> HTTP -> NodeMCU -> Uno       (http pages only, see below)
+ *   usb   browser -> Web Serial -> Uno          (works on https and localhost)
+ *   wifi  browser -> HTTP -> NodeMCU -> Uno     (http pages only, mixed content)
  *
- * The laser is a half duplex, one message at a time medium, and a short
- * message occupies it for roughly 18 seconds. So messages are queued here and
+ * The laser is a one-message-at-a-time medium and a short message occupies it
+ * for the better part of twenty seconds, so messages are queued here and
  * released one by one rather than fired at the Uno, whose 64 byte serial
  * buffer would otherwise overflow.
+ *
+ * Every message starts with a beacon: a slow blink that gives the person
+ * holding the phone time to aim, and gives the receiver something
+ * unmistakably blinking to lock onto.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { SerialLink, serialSupported } from './serial';
-import { buildFrame, frameDurationMs } from './protocol';
+import {
+  DEFAULT_BEACON_MS,
+  buildFrame,
+  effectiveBeaconMs,
+  frameDurationMs,
+} from './protocol';
 
 export type Transport = 'usb' | 'wifi';
+export type Phase = 'idle' | 'beacon' | 'data';
 
 export type Outgoing = {
   id: number;
   at: number;
   text: string;
   state: 'queued' | 'sending' | 'sent' | 'failed';
-  airtimeMs: number;
+  totalMs: number;
+  beaconMs: number;
   startedAt?: number;
   error?: string;
 };
 
 export type LogLine = { t: number; kind: 'tx' | 'rx' | 'sys' | 'err'; text: string };
 
-/** Gap after a frame before the next one goes out, so the idle period is clear. */
-const INTER_MESSAGE_MS = 700;
+/** Quiet gap after a frame so the idle period is unambiguous. */
+const INTER_MESSAGE_MS = 800;
 
 export function useLaserSender(bitMs: number) {
   const linkRef = useRef<SerialLink | null>(null);
@@ -43,12 +53,15 @@ export function useLaserSender(bitMs: number) {
 
   const [transport, setTransport] = useState<Transport>('usb');
   const [nodeIp, setNodeIp] = useState('192.168.4.1');
+  const [beaconMs, setBeaconMsState] = useState(DEFAULT_BEACON_MS);
   const [connected, setConnected] = useState(false);
   const [supported, setSupported] = useState(true);
   const [outgoing, setOutgoing] = useState<Outgoing[]>([]);
   const [lines, setLines] = useState<LogLine[]>([]);
-  const [busyUntil, setBusyUntil] = useState(0);
-  const [tick, setTick] = useState(0);
+  const [active, setActive] = useState<{ startedAt: number; totalMs: number; beaconMs: number } | null>(
+    null,
+  );
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => setSupported(serialSupported()), []);
 
@@ -56,11 +69,12 @@ export function useLaserSender(bitMs: number) {
     setLines((prev) => [...prev.slice(-250), { t: Date.now(), kind, text }]);
   }, []);
 
-  // One timer drives every countdown on screen.
+  // One ticker drives every countdown and progress bar on screen.
   useEffect(() => {
-    const id = window.setInterval(() => setTick(Date.now()), 200);
+    if (!active) return;
+    const id = window.setInterval(() => setNow(Date.now()), 150);
     return () => window.clearInterval(id);
-  }, []);
+  }, [active]);
 
   const sync = useCallback(() => setOutgoing([...queueRef.current]), []);
 
@@ -73,7 +87,8 @@ export function useLaserSender(bitMs: number) {
     [sync],
   );
 
-  // ------------------------------------------------------------- transports
+  /* ------------------------------------------------------------ transports */
+
   const connectUsb = useCallback(async () => {
     try {
       const link = new SerialLink();
@@ -98,7 +113,6 @@ export function useLaserSender(bitMs: number) {
     setConnected(false);
   }, []);
 
-  /** Raw write of one line, by whichever transport is selected. */
   const writeLine = useCallback(
     async (text: string) => {
       if (transport === 'usb') {
@@ -114,7 +128,6 @@ export function useLaserSender(bitMs: number) {
     [transport, nodeIp],
   );
 
-  /** Fire a command that does not occupy the beam (#ON, #OFF, #BIT=n). */
   const sendCommand = useCallback(
     async (text: string) => {
       try {
@@ -127,15 +140,26 @@ export function useLaserSender(bitMs: number) {
     [log, writeLine],
   );
 
-  // ----------------------------------------------------------------- queue
+  const setBeaconMs = useCallback(
+    (ms: number) => {
+      setBeaconMsState(ms);
+      void sendCommand('#BEACON=' + ms);
+    },
+    [sendCommand],
+  );
+
+  /* ---------------------------------------------------------------- queue */
+
   const pump = useCallback(() => {
     if (busyRef.current) return;
     const next = queueRef.current.find((q) => q.state === 'queued');
     if (!next) return;
 
     busyRef.current = true;
-    patch(next.id, { state: 'sending', startedAt: Date.now() });
-    setBusyUntil(Date.now() + next.airtimeMs);
+    const startedAt = Date.now();
+    patch(next.id, { state: 'sending', startedAt });
+    setActive({ startedAt, totalMs: next.totalMs, beaconMs: next.beaconMs });
+    setNow(startedAt);
 
     writeLine(next.text)
       .then(() => {
@@ -143,16 +167,16 @@ export function useLaserSender(bitMs: number) {
         timerRef.current = window.setTimeout(() => {
           patch(next.id, { state: 'sent' });
           busyRef.current = false;
-          setBusyUntil(0);
+          setActive(null);
           pump();
-        }, next.airtimeMs + INTER_MESSAGE_MS);
+        }, next.totalMs + INTER_MESSAGE_MS);
       })
       .catch((err) => {
         const msg = String(err instanceof Error ? err.message : err);
         patch(next.id, { state: 'failed', error: msg });
         log('err', msg);
         busyRef.current = false;
-        setBusyUntil(0);
+        setActive(null);
         pump();
       });
   }, [log, patch, writeLine]);
@@ -166,13 +190,14 @@ export function useLaserSender(bitMs: number) {
         at: Date.now(),
         text,
         state: 'queued',
-        airtimeMs: frameDurationMs(buildFrame(text), bitMs),
+        totalMs: frameDurationMs(buildFrame(text), bitMs, beaconMs),
+        beaconMs: effectiveBeaconMs(beaconMs),
       };
       queueRef.current = [...queueRef.current, item].slice(-60);
       sync();
       pump();
     },
-    [bitMs, pump, sync],
+    [beaconMs, bitMs, pump, sync],
   );
 
   useEffect(
@@ -182,23 +207,27 @@ export function useLaserSender(bitMs: number) {
     [],
   );
 
-  const clear = useCallback(() => {
+  const clearQueue = useCallback(() => {
     queueRef.current = queueRef.current.filter((q) => q.state === 'sending');
     sync();
   }, [sync]);
 
-  const sending = busyUntil > tick;
-  const remainingMs = Math.max(0, busyUntil - tick);
+  /* --------------------------------------------------------------- derived */
+
+  const elapsed = active ? now - active.startedAt : 0;
+  const sending = active !== null && elapsed < active.totalMs;
+  const phase: Phase = !sending ? 'idle' : elapsed < active!.beaconMs ? 'beacon' : 'data';
+  const beaconLeftMs = active ? Math.max(0, active.beaconMs - elapsed) : 0;
+  const totalLeftMs = active ? Math.max(0, active.totalMs - elapsed) : 0;
+  const progressPct = active ? Math.min(100, (elapsed / active.totalMs) * 100) : 0;
   const pending = outgoing.filter((o) => o.state === 'queued').length;
 
   /**
-   * An https page cannot reach a plain http NodeMCU - the browser blocks it as
+   * An https page cannot reach a plain http NodeMCU; the browser blocks it as
    * mixed content. Only the localhost dev server can use the Wi-Fi transport.
    */
   const wifiBlocked =
-    typeof window !== 'undefined' &&
-    window.location.protocol === 'https:' &&
-    transport === 'wifi';
+    typeof window !== 'undefined' && window.location.protocol === 'https:' && transport === 'wifi';
 
   const ready = transport === 'usb' ? connected : !wifiBlocked;
 
@@ -207,6 +236,8 @@ export function useLaserSender(bitMs: number) {
     setTransport,
     nodeIp,
     setNodeIp,
+    beaconMs,
+    setBeaconMs,
     connected,
     supported,
     ready,
@@ -214,12 +245,15 @@ export function useLaserSender(bitMs: number) {
     outgoing,
     lines,
     sending,
-    remainingMs,
+    phase,
+    beaconLeftMs,
+    totalLeftMs,
+    progressPct,
     pending,
     connectUsb,
     disconnectUsb,
     send,
     sendCommand,
-    clear,
+    clearQueue,
   };
 }
