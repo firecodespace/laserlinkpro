@@ -35,37 +35,38 @@ export default function ReceiverPage() {
         by itself - there is nothing to adjust.
       </p>
 
-      {!rx.cameraOn && (
-        <div className="card">
-          <h2>Start the camera</h2>
-          <p className="sub">
-            The browser will ask for camera permission. Hold the phone steady, roughly 30 to 50 cm
-            from the paper and off to one side so you are not in the beam.
-          </p>
-          <button className="primary wide" onClick={rx.start}>
-            Start camera
-          </button>
-          {rx.error && (
-            <p className="hint" style={{ marginTop: 10, color: 'var(--bad)' }}>
-              {rx.error}
+      {/*
+        The video element is mounted at all times, never conditionally. It has
+        to exist in the DOM before start() can attach the MediaStream to it -
+        rendering it only once the camera is running is a deadlock, because
+        the ref is still null at the moment the stream arrives.
+      */}
+      <div className="videoWrap">
+        <video ref={rx.videoRef} playsInline muted />
+        <canvas ref={rx.overlayRef} className="overlay" />
+        {rx.cameraOn ? (
+          <div className="videoBadge">
+            <span className={'pill ' + s.cls}>
+              <span className="dot" />
+              {s.label}
+            </span>
+          </div>
+        ) : (
+          <div className="videoCover">
+            <p>
+              Point this phone at the laser spot on the paper, about 30 to 50 cm away and off to
+              one side so you are not in the beam.
             </p>
-          )}
-        </div>
-      )}
+            <button className="primary" onClick={rx.start}>
+              Start camera
+            </button>
+            {rx.error && <p className="err">{rx.error}</p>}
+          </div>
+        )}
+      </div>
 
       {rx.cameraOn && (
         <>
-          <div className="videoWrap">
-            <video ref={rx.videoRef} playsInline muted />
-            <canvas ref={rx.overlayRef} className="overlay" />
-            <div className="videoBadge">
-              <span className={'pill ' + s.cls}>
-                <span className="dot" />
-                {s.label}
-              </span>
-            </div>
-          </div>
-
           {rx.decoding && (
             <div className="card" style={{ marginTop: 12 }}>
               <div className="row" style={{ justifyContent: 'space-between' }}>
