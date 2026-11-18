@@ -27,6 +27,22 @@
 const char *AP_SSID = "LaserLink-Node";
 const char *AP_PASS = "laserlink";
 
+/*
+  Optional: join an existing Wi-Fi network as well as serving the page.
+
+  Leave STA_SSID empty for the self-contained demo - the board makes its own
+  access point and lives at 192.168.4.1. The catch is that a laptop joined to
+  that AP has no internet, so it cannot load the hosted web app.
+
+  Fill these in and the board ALSO joins your normal network and prints the
+  address it was given. The laptop then stays online, runs the chat page from
+  the local dev server, and posts messages to that address.
+*/
+const char *STA_SSID = "";
+const char *STA_PASS = "";
+
+const uint32_t STA_TIMEOUT_MS = 12000;
+
 const uint8_t PIN_TO_UNO = D5;   // GPIO14 -> Uno D10
 
 ESP8266WebServer server(80);
@@ -125,6 +141,43 @@ void handleCmd() {
   c.trim();
   if (c.length() > 0) pushToUno(c);
   redirectHome();
+}
+
+/*
+  JSON API used by the Chat page's Wi-Fi transport.
+
+  The browser calls this from a different origin, so the reply needs an
+  Access-Control-Allow-Origin header or the fetch is rejected. Note that an
+  https page still cannot call this plain http board - the browser blocks it
+  as mixed content - so the chat sender must be on http://localhost.
+*/
+void sendCors() {
+  server.sendHeader(F("Access-Control-Allow-Origin"), F("*"));
+  server.sendHeader(F("Access-Control-Allow-Methods"), F("GET, OPTIONS"));
+}
+
+void handleApiSend() {
+  String msg = server.arg("msg");
+  msg.trim();
+  sendCors();
+  if (msg.length() == 0) {
+    server.send(400, F("application/json"), F("{\"ok\":false,\"error\":\"empty message\"}"));
+    return;
+  }
+  if (msg.length() > 60) msg = msg.substring(0, 60);
+  if (!msg.startsWith("#")) msg.toUpperCase();
+  pushToUno(msg);
+  String j = F("{\"ok\":true,\"sent\":\"");
+  j += msg;
+  j += F("\",\"count\":");
+  j += String(sentCount);
+  j += F("}");
+  server.send(200, F("application/json"), j);
+}
+
+void handleApiOptions() {
+  sendCors();
+  server.send(204, F("text/plain"), "");
 }
 
 void handleStatus() {

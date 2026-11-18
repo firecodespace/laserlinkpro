@@ -152,3 +152,44 @@ table.kv td { padding: 7px 0; border-bottom: 1px solid var(--line); }
 table.kv td:first-child { color: var(--muted); width: 45%; }
 table.kv td:last-child { font-family: var(--mono); }
 table.kv tr:last-child td { border-bottom: none; }
+
+/* ---------- chat ---------- */
+.modebar {
+  display: inline-flex; gap: 5px; background: var(--panel-2);
+  padding: 5px; border-radius: 11px; border: 1px solid var(--line); margin-bottom: 18px;
+}
+.modebar button { border: none; background: transparent; padding: 9px 20px; border-radius: 7px; color: var(--muted); }
+.modebar button[data-on="true"] { background: var(--accent); color: #fff; font-weight: 600; }
+.modebar button:hover:not([data-on="true"]) { background: #222b3a; color: var(--text); }
+
+.thread {
+  display: flex; flex-direction: column; gap: 10px;
+  height: 46vh; min-height: 280px; overflow-y: auto;
+  padding: 14px; background: #080b10;
+  border: 1px solid var(--line); border-radius: 8px;
+}
+.bubble {
+  max-width: 78%; padding: 10px 13px; border-radius: 14px;
+  font-size: 14.5px; line-height: 1.45; word-break: break-word;
+}
+.bubble .btext { font-family: var(--mono); }
+.bubble.out { align-self: flex-end; background: #233049; border: 1px solid #35486b; border-bottom-right-radius: 4px; }
+.bubble.in { align-self: flex-start; background: var(--panel-2); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.bubble.in.bad { border-color: #4a2320; background: rgba(255, 92, 84, .09); }
+.bubble.sim { border-style: dashed; }
+.bubble .bmeta { font-size: 11px; color: var(--muted); margin-top: 6px; font-family: var(--mono); }
+.bubble.failed { border-color: #4a2320; }
+
+.progressbar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: 8px; }
+.progressbar i { display: block; height: 100%; background: var(--accent); transition: width .2s linear; }
+
+.composer { display: flex; gap: 8px; margin-top: 12px; }
+.composer input[type="text"] { flex: 1; }
+
+.typing { align-self: flex-start; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; font-family: var(--mono); }
+.typing .blink { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+
+.empty { margin: auto; color: var(--muted); font-size: 13px; text-align: center; line-height: 1.6; }
+.camStrip { display: grid; grid-template-columns: 220px 1fr; gap: 14px; align-items: start; }
+@media (max-width: 720px) { .camStrip { grid-template-columns: 1fr; } }
