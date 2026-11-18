@@ -201,18 +201,44 @@ void setup() {
   // Transmit only: no RX pin, so nothing 5 V can reach this board.
   unoLink.begin(9600, SWSERIAL_8N1, -1, PIN_TO_UNO, false);
 
-  WiFi.mode(WIFI_AP);
+  // Always bring the access point up so the demo works with no network at
+  // all, and additionally join the house network when one is configured.
+  const bool wantSta = strlen(STA_SSID) > 0;
+  WiFi.mode(wantSta ? WIFI_AP_STA : WIFI_AP);
+
   bool ok = WiFi.softAP(AP_SSID, AP_PASS);
   Serial.print(F("AP \""));
   Serial.print(AP_SSID);
   Serial.println(ok ? F("\" up") : F("\" FAILED"));
-  Serial.print(F("Open http://"));
+  Serial.print(F("  http://"));
   Serial.println(WiFi.softAPIP());
+
+  if (wantSta) {
+    Serial.print(F("Joining \""));
+    Serial.print(STA_SSID);
+    Serial.print(F("\" "));
+    WiFi.begin(STA_SSID, STA_PASS);
+    uint32_t started = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - started < STA_TIMEOUT_MS) {
+      delay(400);
+      Serial.print('.');
+    }
+    Serial.println();
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print(F("  joined, http://"));
+      Serial.println(WiFi.localIP());
+      Serial.println(F("  put that address in the chat page's Wi-Fi box"));
+    } else {
+      Serial.println(F("  could not join - access point still available"));
+    }
+  }
 
   server.on("/", handleRoot);
   server.on("/send", handleSend);
   server.on("/cmd", handleCmd);
   server.on("/status", handleStatus);
+  server.on("/api/send", HTTP_GET, handleApiSend);
+  server.on("/api/send", HTTP_OPTIONS, handleApiOptions);
   server.onNotFound(redirectHome);
   server.begin();
   Serial.println(F("Web server ready on port 80"));
