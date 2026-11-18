@@ -3,26 +3,28 @@
 Phase-0 prototype of an IoT laser communication link.
 Course: IoT-Based Product Design, AIDC.
 
-> Fill in the **Measured on the day** section during setup. Everything else is
-> already verified.
+> Fill in **Section 9** during setup. Everything else is already verified.
 
 ---
 
 ## 1. What it is
 
 An Arduino Uno flashes text through a KY-008 laser onto white paper. A phone
-camera watches the spot, recovers the bits, and checks a CRC-8 on every frame.
-A NodeMCU (ESP8266) serves a Wi-Fi page that injects messages into the link,
-and an MH slot sensor fires an automatic alert.
+camera watches the spot, finds it automatically, recovers the bits, and checks
+a CRC-8 on every frame. A NodeMCU (ESP8266, ESP-12E) can inject messages over
+Wi-Fi, and an MH slot sensor fires an automatic alert.
 
-The web app is a Next.js 15 site with four working pages:
+The web app is deliberately just **two windows**:
 
-| Page | What it does |
-|---|---|
-| `/chat` | **The demo.** Sender window (laptop) and receiver window (phone), one beam between them |
-| `/transmit` | Engineering console: Web Serial to the Uno, command buttons, waveform preview |
-| `/receive` | Camera decoder with signal scope, fps and contrast meters |
-| `/protocol` | Frame builder showing every byte, plus a decoder bench with simulated noise |
+| Route | Device | What it does |
+|---|---|---|
+| `/` | either | Pick this device's role |
+| `/sender` | laptop | Uno over USB. Type a message, it leaves as light. |
+| `/receiver` | phone | Camera. Finds the beam and decodes by itself. |
+| `/protocol` | — | Reference and decoder bench, linked from the home page |
+
+There is nothing to tune on the receiver. The old build had *Find dot* and
+*Lock exposure* buttons; both are now continuous and automatic.
 
 ---
 
@@ -34,15 +36,28 @@ The web app is a Next.js 15 site with four working pages:
 | Byte | start bit OFF, 8 data bits LSB first (ON = 1), stop bit ON |
 | Frame | `0xFF 0x7E LEN payload CRC8` |
 | CRC-8 | poly `0x07`, init `0x00`, over LEN + payload |
+| **Beacon** | **blink 200 ms on / 200 ms off, default 4 s, before every message** |
 | Preamble | ON 500 ms, OFF 500 ms, then ON for max(1 s, 12 bit times) |
 | Default bit time | 120 ms |
 | Max payload | 60 characters, upper-case ASCII |
-
-The guard period is deliberately longer than the longest ON run a frame can
-contain (nine bit times, from byte `0xFF`), so payload can never be mistaken
-for a preamble.
+| Idle tail | 4 bit times of ON after the last stop bit |
 
 `HELLO IOT` on the wire: `FF 7E 09 48 45 4C 4C 4F 20 49 4F 54 87`
+
+### Why the beacon exists
+
+It does two jobs at once:
+
+1. **Human time.** It gives whoever holds the phone a few seconds to aim
+   before any data moves. The sender shows a countdown.
+2. **Machine acquisition.** The receiver finds the spot by looking for the
+   part of the picture that is *blinking*, not the part that is brightest. A
+   lamp or a reflection is bright but constant, so it scores zero. Nothing in
+   a room blinks at 2.5 Hz, so the lock is unambiguous.
+
+Each blink (200 ms) is far shorter than the preamble guard (1440 ms at the
+default bit time), so the decoder can never mistake the beacon for a frame.
+Measured: **zero false frames** across every bit time and noise level tested.
 
 ---
 
@@ -50,25 +65,34 @@ for a preamble.
 
 **CRC-8** matches the standard check vector: `"123456789"` → `0xF4`. ✓
 
-**Decoder delivery rate**, 40 messages per cell, simulated camera samples
-(`lib/simulate.ts` replaying real waveforms through the real decoder):
+**Firmware and web app agree.** The Uno independently computed `crc=0x87` for
+`HELLO IOT`, matching the TypeScript implementation byte for byte.
 
-| bit time | clean | 1% noise | 3% noise | 5% noise | samples/bit |
-|---|---|---|---|---|---|
-| 66 ms @ 30 fps | 23% | 0% | 0% | 0% | 2.0 |
-| 100 ms @ 30 fps | 100% | 35% | 5% | 0% | 3.0 |
-| **120 ms @ 30 fps** | **100%** | **78%** | 30% | 8% | 3.6 |
-| 150 ms @ 30 fps | 100% | 73% | 25% | 13% | 4.5 |
-| 200 ms @ 30 fps | 100% | 88% | 50% | 13% | 6.0 |
-| 300 ms @ 30 fps | 100% | 73% | 45% | 28% | 9.0 |
-| 66 ms @ 60 fps | 100% | 80% | 35% | 15% | 4.0 |
-| 120 ms @ 60 fps | 100% | 88% | 55% | 20% | 7.2 |
+**Transmit timing measured on the real Uno** (serial timestamps):
+
+| Message | Predicted | Measured |
+|---|---|---|
+| `HELLO IOT`, no beacon | 18.04 s | **18.07 s** |
+| `A`, no beacon | 8.92 s | **8.94 s** |
+
+0.2% error over 18 seconds.
+
+**Decoder delivery rate**, simulated camera samples replayed through the real
+decoder, 30 messages per cell, 30 fps, 4 s beacon:
+
+| bit time | clean | 1% noise | 3% noise | samples/bit |
+|---|---|---|---|---|
+| 100 ms | 100% | 37% | 0% | 3.0 |
+| **120 ms** | **100%** | **83%** | 37% | 3.6 |
+| 150 ms | 100% | 77% | 47% | 4.5 |
+| 200 ms | 100% | 93% | 43% | 6.0 |
+| 66 ms | fails | fails | fails | 2.0 |
 
 **Firmware build sizes**
 
 | Sketch | Flash | RAM |
 |---|---|---|
-| `LaserLink_TX_Uno` | 8 272 B (25%) | 413 B (20%) |
+| `LaserLink_TX_Uno` | 8 656 B (26%) | 423 B (20%) |
 | `LaserLink_WiFi_NodeMCU` | 279 364 B (26%) | 29 100 B (36%) |
 
 ---
@@ -76,21 +100,38 @@ for a preamble.
 ## 4. Honest limits
 
 - **Throughput is about 8.3 bits/s** at 120 ms per bit, so roughly 0.8
-  characters per second. `HELLO IOT` takes about 18 seconds end to end.
+  characters per second. `HELLO IOT` takes about 18 seconds, plus the beacon.
 - **The camera is the bottleneck, not the laser.** A phone samples at about
-  30 fps, which is 3.6 samples per bit. The laser itself would switch orders
-  of magnitude faster.
-- **`#BIT=66` does not work on a 30 fps camera.** That is 2 samples per bit,
-  below the Nyquist limit — measured 23% delivery even with a clean signal,
-  0% with any noise. It only reaches 100% if the camera runs at 60 fps.
+  30 fps, which is 3.6 samples per bit at the default setting.
+- **`#BIT=66` cannot work on a 30 fps camera** — 2 samples per bit is below
+  the Nyquist limit. Measured 0–33% even with a clean signal. It only works if
+  the camera genuinely runs at 60 fps.
 - **CRC-8 detects errors, it does not correct them.** There is no
-  retransmission. A corrupted message is reported as `CRC FAILED`, not fixed.
-- **The link is one-way.** Laptop to phone only. The chat is a chat in
+  retransmission. A corrupted message is reported as `CRC FAILED`, never
+  guessed at.
+- **The link is one-way**, laptop to phone. The chat is a chat in
   presentation, not a two-way protocol.
-- Decoder robustness comes from three things added after the first version
-  failed under noise: a one-frame glitch filter, triangular-weighted bit
-  voting across the whole bit, and letting CRC-8 judge frames whose stop bit
-  was misread rather than discarding them.
+
+### Decoder fixes made after measurement
+
+Each of these was found by measuring, not by reading the code:
+
+1. **Glitch filter.** One mis-read video frame used to split the preamble
+   guard in two, so sync never happened. A level change is now only believed
+   after two samples agree.
+2. **Triangular-weighted bit voting.** Sampling only at the bit centre wasted
+   most of the bit. Weighting every sample across the bit by distance from the
+   centre lifted 100 ms from 65% to 100%.
+3. **CRC judges framing errors.** A stop bit misread by one frame used to
+   discard a whole good message; now the frame is kept and CRC-8 decides.
+4. **Midpoint edge timing.** Edges were dated at the first sample of the new
+   level, biasing the byte clock late by up to a full frame — a third of a bit
+   at 100 ms. Taking the midpoint between the last old-level and first
+   new-level sample took 100 ms with beacon from 63% back to 100%.
+5. **Idle tail.** With the laser idling off, the beam went dark the instant
+   the last stop bit ended, leaving the final CRC byte's stop bit ambiguous.
+6. **Silent aborts.** A failure on the very first header byte emitted no
+   event, which hid fault 4 for a while. Aborts are always reported now.
 
 ---
 
@@ -116,7 +157,23 @@ takes power from its own USB cable.
 
 ---
 
-## 6. Ports and toolchain
+## 6. Serial commands
+
+9600 baud, line ending **Newline**.
+
+| Command | Effect |
+|---|---|
+| `#BIT=n` | bit time, 50–300 ms (default 120) |
+| `#BEACON=ms` | beacon length, 0–15000 ms (default 4000) |
+| `#ON` / `#OFF` | laser idle state |
+| `#TEST` | send `HELLO IOT` |
+| `#SENSOR=0/1` | enable the slot sensor alert |
+| `#STATUS` | print current settings |
+| anything else | sent over the laser, up to 60 characters |
+
+---
+
+## 7. Toolchain
 
 | Item | Value |
 |---|---|
@@ -124,65 +181,35 @@ takes power from its own USB cable.
 | Cores | `arduino:avr` 1.8.7, `esp8266:esp8266` 3.1.2 |
 | Uno FQBN | `arduino:avr:uno` |
 | NodeMCU FQBN | `esp8266:esp8266:nodemcuv2` |
-| Uno port | _fill in — was COM14 previously_ |
-| NodeMCU port | _fill in_ |
-
-Upload commands:
-
-```powershell
-& "C:\Program Files\Arduino CLI\arduino-cli.exe" compile --fqbn arduino:avr:uno LaserLink_TX_Uno
-```
+| Uno port | COM14 (CH340) |
 
 ```powershell
 & "C:\Program Files\Arduino CLI\arduino-cli.exe" upload -p COM14 --fqbn arduino:avr:uno LaserLink_TX_Uno
 ```
 
+**If upload says "Access is denied"**, a browser tab has the port open over
+Web Serial. Press **Disconnect** on the sender page first.
+
 ---
 
-## 7. Known environment quirks
+## 8. Environment quirks
 
 - **`D:` is exFAT.** Node's `readlink` returns `EISDIR` there where NTFS
-  returns `EINVAL`, which Next.js treats as fatal. So `npm run build` fails
-  locally while `npm run dev` works fine. This does **not** affect Vercel,
-  which builds on Linux. Production builds were verified by building a copy of
+  returns `EINVAL`, which Next.js treats as fatal. `npm run build` therefore
+  fails locally while `npm run dev` works. This does **not** affect Vercel,
+  which builds on Linux. Production builds are verified by building a copy of
   the project on `C:`.
-- **Next.js was pinned to 15.5.4**, which has CVE-2025-66478. Vercel's security
-  gate blocked the deployment even though the build itself succeeded. Fixed by
-  moving to **15.5.29** (the advisory names 15.5.7 as the patched 15.5.x).
-  `package-lock.json` is committed, so the lockfile had to be updated too.
-
----
-
-## 8. Two-minute run sheet
-
-1. Room lights down. Laser 0.5–1.5 m from the paper, beam at table height,
-   pointed at the white sheet.
-2. **Laptop** — open `/chat`, mode **Sender**, press *Connect to Uno*, pick the
-   serial port. Wait for `LaserLink TX ready` in the log.
-3. **Phone** — open the same `/chat` URL, mode **Receiver**, *Start camera*,
-   aim at the spot, *Find dot*, *Lock exposure*. Check fps ≥ 24 and
-   contrast ≥ 12.
-4. Type a message on the laptop and send. Point out the progress bar: the beam
-   is busy for ~18 s, and the phone shows *incoming transmission n/13 bytes*
-   as the bytes land.
-5. Message appears on the phone marked **CRC ok**. Say plainly: the two devices
-   share no network, only the beam.
-6. Block the MH slot sensor → `SENSOR ALERT` is sent on its own (rate limited
-   to one per 15 s).
-7. Join Wi-Fi `LaserLink-Node` (password `laserlink`) on a second phone, open
-   `192.168.4.1`, press *Sensor reading* → `TEMP 27.5C` arrives over the beam.
-8. Press *Laser off*. Close with the honest limit: the camera's frame rate is
-   the ceiling, and a photodiode would move this into the kilobit range —
-   that is Phase 1.
-
-**Safety line to say out loud:** the KY-008 is a Class 3R laser; the beam stays
-at table height on the paper, never toward eyes or shiny surfaces.
+- **Next.js 15.5.4 had CVE-2025-66478.** Vercel's security gate blocked the
+  deployment even though the build itself succeeded. Fixed by moving to
+  **15.5.29**. `package-lock.json` is committed, so the lockfile had to move
+  too — bumping `package.json` alone would not have worked.
+- npm on this exFAT volume sometimes reports "up to date" while packages are
+  physically missing, and leaves locked `node_modules/.next-XXXX` staging
+  folders behind if interrupted. `npm ci` is the reliable repair.
 
 ---
 
 ## 9. Measured on the day
-
-_Fill these in during setup._
 
 | Measurement | Value |
 |---|---|
@@ -190,21 +217,50 @@ _Fill these in during setup._
 | Phone-to-paper distance | |
 | Room lighting | |
 | Camera fps observed | |
-| Contrast observed | |
+| Samples/bit observed | |
+| Lock score observed | |
 | Bit time used | |
+| Beacon length used | |
 | Messages sent | |
 | Messages delivered with CRC ok | |
 | Delivery rate | |
 | Sensor alert fired correctly | |
 | NodeMCU message delivered | |
 
+---
+
+## 10. Two-minute run sheet
+
+1. Room lights down. Laser 0.5–1.5 m from the paper, beam at table height,
+   pointed at the white sheet.
+2. **Laptop** — open the site, choose **Sender**, press *Connect to Uno*, pick
+   COM14. Wait for `LaserLink TX ready` in the link log.
+3. **Phone** — open the same URL, choose **Receiver**, press *Start camera*,
+   point it at the paper. Check **samples/bit reads 3 or more**.
+4. Type a message and send. Say what is happening: *the laser is blinking now,
+   that is the beacon, and the phone is using it to find the beam.* The circle
+   on the phone turns green when it locks.
+5. The message lands marked **CRC ok**. Make the point plainly: the two devices
+   share no network, only the beam.
+6. Block the MH slot sensor → `SENSOR ALERT` goes out by itself, rate limited
+   to one per 15 s.
+7. Join Wi-Fi `LaserLink-Node` (password `laserlink`) on a second phone, open
+   `192.168.4.1`, press *Sensor reading* → `TEMP 27.5C` arrives over the beam.
+8. Press *Laser off*. Close on the honest limit: the camera's frame rate is the
+   ceiling, and a photodiode would move this into the kilobit range. That is
+   Phase 1.
+
+**Safety line to say out loud:** the KY-008 is a Class 3R laser; the beam stays
+at table height on the paper, never toward eyes or shiny surfaces.
+
 ### If it does not decode
 
 | Symptom | Fix |
 |---|---|
-| fps below 24 | Set bit time to 150 ms on **both** sides |
-| Contrast below 12 | Dim the room, move the phone closer, re-run *Find dot* |
+| Samples/bit below 3 | Raise bit time to 150 ms on **both** sides |
+| Circle never turns green | Make sure a message is actually sending — the lock needs the beacon's blink |
+| Circle locks on the wrong thing | Press *Re-acquire* |
+| fps below 24 | Close other apps, brighten nothing, raise bit time |
 | Decoder never locks | Check both sides show the same bit time |
-| Spot drifts out of the circle | Steady the phone, press *Find dot* again |
-| Exposure keeps hunting | Press *Lock exposure* after *Find dot* |
 | Sensor fires on removal | Swap `LOW` for `HIGH` on the marked line in the Uno sketch, re-upload |
+| Upload says access denied | Press *Disconnect* on the sender page |

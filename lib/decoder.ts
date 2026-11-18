@@ -41,6 +41,7 @@ export class LaserDecoder {
   private pendLevel: 0 | 1 | null = null;
   private pendSince = 0;
   private pendCount = 0;
+  private lastSameT = 0;
 
   /** Bytes whose start or stop bit was misread but which CRC-8 still judged. */
   framingErrors = 0;
@@ -92,7 +93,9 @@ export class LaserDecoder {
     if (this.curLevel === null) {
       this.curLevel = v;
       this.curStart = t;
+      this.lastSameT = t;
     } else if (v === this.curLevel) {
+      this.lastSameT = t;
       this.pendLevel = null;
       this.pendCount = 0;
     } else {
@@ -104,9 +107,15 @@ export class LaserDecoder {
         this.pendSince = t;
       }
       if (this.pendCount >= this.confirmSamples()) {
-        this.onRunEnd(this.curLevel, this.curStart, this.pendSince);
+        // The true edge lies somewhere between the last sample at the old
+        // level and the first at the new one. Dating it at either end biases
+        // the whole byte clock by up to a frame, which is a third of a bit at
+        // 100 ms, so take the midpoint.
+        const edge = (this.lastSameT + this.pendSince) / 2;
+        this.onRunEnd(this.curLevel, this.curStart, edge);
         this.curLevel = v;
-        this.curStart = this.pendSince;
+        this.curStart = edge;
+        this.lastSameT = t;
         this.pendLevel = null;
         this.pendCount = 0;
       }
@@ -219,7 +228,7 @@ export class LaserDecoder {
   }
 
   private abort(now: number, reason: string) {
-    if (this.bytes.length > 0) this.onEvent?.({ kind: 'abort', t: now, reason });
+    this.onEvent?.({ kind: 'abort', t: now, reason });
     this.mode = 'HUNT';
     this.bytes = [];
     this.lastOffMs = 0;
