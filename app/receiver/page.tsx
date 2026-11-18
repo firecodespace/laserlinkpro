@@ -75,7 +75,7 @@ export default function ReceiverPage() {
               Point this phone at the laser spot on the paper, about 30 to 50 cm away and off to
               one side so you are not in the beam.
             </p>
-            <button className="primary" onClick={rx.start}>
+            <button className="primary" onClick={() => rx.start()}>
               Start camera
             </button>
             {rx.error && <p className="err">{rx.error}</p>}
@@ -133,6 +133,28 @@ export default function ReceiverPage() {
               onChange={(e) => rx.setExposure(Number(e.target.value) / 100)}
               disabled={noExposureControl}
             />
+
+            {rx.cameras.length > 1 && (
+              <>
+                <label className="field" style={{ marginTop: 12 }} htmlFor="camsel">
+                  Which camera
+                </label>
+                <select
+                  id="camsel"
+                  value={rx.cameraId ?? ''}
+                  onChange={(e) => {
+                    rx.stop();
+                    void rx.start(e.target.value);
+                  }}
+                >
+                  {rx.cameras.map((c) => (
+                    <option key={c.deviceId} value={c.deviceId}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
 
             {rx.camSupports.zoom && (
               <>

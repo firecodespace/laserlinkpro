@@ -68,6 +68,8 @@ export function useLaserReceiver(bitMs: number) {
   const [partial, setPartial] = useState<number[]>([]);
   const [camSupports, setCamSupports] = useState(tunerRef.current.supports);
   const [camAuto, setCamAuto] = useState(true);
+  const [cameras, setCameras] = useState<{ deviceId: string; label: string }[]>([]);
+  const [cameraId, setCameraId] = useState<string | null>(null);
   const [exposure, setExposureState] = useState(0.12);
   const [zoom, setZoomState] = useState(0);
   const evIdRef = useRef(1);
@@ -236,23 +238,68 @@ export function useLaserReceiver(bitMs: number) {
     else requestAnimationFrame(loop);
   }, [drawOverlay, drawScope]);
 
-  const start = useCallback(async () => {
-    setError('');
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          frameRate: { ideal: 60, min: 24 },
-        },
-        audio: false,
-      });
+  /**
+   * Open the camera, falling back through progressively looser constraints.
+   *
+   * The first attempt asks for a rear 640x480 feed. Nothing in it is a hard
+   * requirement: an exact or min frameRate makes getUserMedia throw
+   * OverconstrainedError outright on cameras that cannot meet it, and a dead
+   * camera is far worse than a slow one. If even the loose attempt fails the
+   * real error is reported rather than a guess.
+   */
+  const start = useCallback(
+    async (deviceId?: string) => {
+      setError('');
+      const attempts: MediaStreamConstraints[] = deviceId
+        ? [
+            { video: { deviceId: { exact: deviceId }, width: { ideal: 640 }, height: { ideal: 480 } }, audio: false },
+            { video: { deviceId: { exact: deviceId } }, audio: false },
+          ]
+        : [
+            {
+              video: {
+                facingMode: { ideal: 'environment' },
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+                frameRate: { ideal: 60 },
+              },
+              audio: false,
+            },
+            { video: { facingMode: { ideal: 'environment' } }, audio: false },
+            { video: true, audio: false },
+          ];
+
+      let stream: MediaStream | null = null;
+      let lastErr: unknown = null;
+      for (const c of attempts) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(c);
+          break;
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      if (!stream) {
+        setError(
+          'Could not open the camera: ' +
+            String(lastErr instanceof Error ? lastErr.message : lastErr) +
+            '. The page must be on https or localhost, and the browser needs camera permission.',
+        );
+        return;
+      }
+
       streamRef.current = stream;
       const video = videoRef.current;
-      if (!video) return;
+      if (!video) {
+        setError('Internal error: the video element was not ready.');
+        return;
+      }
       video.srcObject = stream;
-      await video.play();
+      try {
+        await video.play();
+      } catch {
+        /* some browsers resolve play() late; sampling copes either way */
+      }
 
       const track = stream.getVideoTracks()[0];
       if (track) {
@@ -261,20 +308,29 @@ export function useLaserReceiver(bitMs: number) {
         setCamSupports({ ...tunerRef.current.supports });
         setExposureState(tunerRef.current.exposureFrac);
         setCamAuto(tunerRef.current.auto);
+        setCameraId(track.getSettings?.().deviceId ?? null);
       }
+
+      // Labels are only populated once permission has been granted.
+      try {
+        const list = await navigator.mediaDevices.enumerateDevices();
+        setCameras(
+          list
+            .filter((d) => d.kind === 'videoinput')
+            .map((d, i) => ({ deviceId: d.deviceId, label: d.label || 'Camera ' + (i + 1) })),
+        );
+      } catch {
+        /* enumeration is optional */
+      }
+
       trackerRef.current.reset();
       decoderRef.current.reset();
       runningRef.current = true;
       setCameraOn(true);
       loop();
-    } catch (err) {
-      setError(
-        'Could not open the camera: ' +
-          String(err instanceof Error ? err.message : err) +
-          '. The page must be on https or localhost, and the browser needs camera permission.',
-      );
-    }
-  }, [loop]);
+    },
+    [loop],
+  );
 
   const stop = useCallback(() => {
     runningRef.current = false;
@@ -378,6 +434,8 @@ export function useLaserReceiver(bitMs: number) {
     partial,
     camSupports,
     camAuto,
+    cameras,
+    cameraId,
     exposure,
     zoom,
     setExposure,
