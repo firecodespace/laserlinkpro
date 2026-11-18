@@ -30,6 +30,19 @@ export default function Home() {
         you are wiring or adjusting anything.
       </div>
 
+      <div className="card" style={{ marginBottom: 16, borderColor: '#35486b' }}>
+        <h2>Chat demo - start here</h2>
+        <p className="sub">
+          One page, two windows. Open it on the laptop as the <b>sender</b> and on a phone as the{' '}
+          <b>receiver</b>. Type a message on the laptop; it leaves as light and arrives on the
+          phone because the camera read it off the paper. No network path exists between the two
+          devices, which is the whole point.
+        </p>
+        <Link className="btn" href="/chat/">
+          Open chat
+        </Link>
+      </div>
+
       <div className="grid cols-3">
         <div className="card">
           <h2>1. Transmit</h2>
@@ -127,15 +140,16 @@ export default function Home() {
         <ol className="steps">
           <li>Room lights down. Laser 0.5 - 1.5 m from the paper, beam at table height.</li>
           <li>
-            Laptop: <Link href="/transmit/">Transmit</Link>, Connect to Uno, wait for &quot;LaserLink
-            TX ready&quot;.
+            Laptop: <Link href="/chat/">Chat</Link> in Sender mode, Connect to Uno, wait for
+            &quot;LaserLink TX ready&quot;.
           </li>
           <li>
-            Phone: <Link href="/receive/">Receive</Link>, Start camera, Find dot, Lock exposure.
-            Check fps is 24 or better.
+            Phone: <Link href="/chat/">Chat</Link> in Receiver mode, Start camera, Find dot, Lock
+            exposure. Check fps is 24 or better.
           </li>
           <li>
-            Send <code>#TEST</code>. &quot;HELLO IOT&quot; lands with CRC ok after about 18 s.
+            Type a message on the laptop and send it. It appears on the phone about 18 s later,
+            marked CRC ok - carried only by the beam.
           </li>
           <li>Block the slot sensor. &quot;SENSOR ALERT&quot; goes out by itself.</li>
           <li>
