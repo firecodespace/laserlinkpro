@@ -73,6 +73,8 @@ export function useLaserReceiver(bitMs: number) {
   const [exposure, setExposureState] = useState(0.12);
   const [zoom, setZoomState] = useState(0);
   const evIdRef = useRef(1);
+  const bitMsRef = useRef(bitMs);
+  bitMsRef.current = bitMs;
 
   const pushEvent = useCallback((kind: string, text: string) => {
     setEvents((prev) =>
@@ -91,6 +93,20 @@ export function useLaserReceiver(bitMs: number) {
         setDecoding(true);
         setPartial([]);
         pushEvent('sync', 'preamble locked - reading bytes');
+      }
+      if (e.kind === 'lock') {
+        const drift = Math.abs(e.bitMs - bitMsRef.current) / bitMsRef.current;
+        pushEvent(
+          'sync',
+          'clock locked: measured ' +
+            e.bitMs +
+            ' ms/bit (' +
+            e.score +
+            '/20 header bits)' +
+            (drift > 0.1
+              ? '  <-- sender looks set to ' + e.bitMs + ' ms, this page is on ' + bitMsRef.current + ' ms'
+              : ''),
+        );
       }
       if (e.kind === 'byte') {
         setPartial((prev) => [...prev, e.value]);
