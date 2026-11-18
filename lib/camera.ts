@@ -159,8 +159,16 @@ export class SpotTracker {
   private bmin = new Float32Array(COLS * ROWS);
   private bmax = new Float32Array(COLS * ROWS);
   private reds = new Float32Array(COLS * ROWS);
+  // Luminance envelopes run alongside the red ones. A real laser dot is often
+  // so bright that its core clips to pure white, and R=G=B=255 has no red
+  // excess at all. Only the BLINK of luminance is ever scored, never its
+  // steady level, otherwise bright white paper would win every time.
+  private lmin = new Float32Array(COLS * ROWS);
+  private lmax = new Float32Array(COLS * ROWS);
+  private lums = new Float32Array(COLS * ROWS);
   private seeded = false;
   private history: number[] = [];
+  private lumHistory: number[] = [];
   private level: 0 | 1 = 1;
   private cx = W / 2;
   private cy = H / 2;
@@ -180,7 +188,10 @@ export class SpotTracker {
   reset() {
     this.bmin.fill(0);
     this.bmax.fill(0);
+    this.lmin.fill(0);
+    this.lmax.fill(0);
     this.history = [];
+    this.lumHistory = [];
     this.seeded = false;
     this.lockScore = 0;
     this.manual = false;
@@ -190,6 +201,7 @@ export class SpotTracker {
 
   resetHistory() {
     this.history = [];
+    this.lumHistory = [];
   }
 
   /** Pin the spot by hand. Normalised 0..1 coordinates from a tap. */
@@ -198,6 +210,7 @@ export class SpotTracker {
     this.cy = Math.min(H - 1, Math.max(0, ny * H));
     this.manual = true;
     this.history = [];
+    this.lumHistory = [];
     this.rivalBlock = -1;
     this.rivalFrames = 0;
   }
@@ -205,6 +218,7 @@ export class SpotTracker {
   resumeAuto() {
     this.manual = false;
     this.history = [];
+    this.lumHistory = [];
   }
 
   sample(video: HTMLVideoElement): SampleInfo | null {
@@ -213,8 +227,9 @@ export class SpotTracker {
     ctx.drawImage(video, 0, 0, W, H);
     const d = ctx.getImageData(0, 0, W, H).data;
 
-    // ---- per block peak RED EXCESS, not brightness ------------------------
+    // ---- per block peak red excess AND peak luminance ---------------------
     this.reds.fill(0);
+    this.lums.fill(0);
     let anySat = false;
     for (let y = 0; y < H; y++) {
       const brow = (y >> 3) * COLS;
@@ -223,11 +238,11 @@ export class SpotTracker {
         const r = d[i];
         const g = d[i + 1];
         const b = d[i + 2];
+        const bi = brow + (x >> 3);
         const excess = r - (g > b ? g : b);
-        if (excess > 0) {
-          const bi = brow + (x >> 3);
-          if (excess > this.reds[bi]) this.reds[bi] = excess;
-        }
+        if (excess > this.reds[bi]) this.reds[bi] = excess;
+        const lum = r > g ? (r > b ? r : b) : g > b ? g : b;
+        if (lum > this.lums[bi]) this.lums[bi] = lum;
         if (r > 250 && g > 250 && b > 250) anySat = true;
       }
     }
@@ -236,16 +251,27 @@ export class SpotTracker {
     if (!this.seeded) {
       this.bmin.set(this.reds);
       this.bmax.set(this.reds);
+      this.lmin.set(this.lums);
+      this.lmax.set(this.lums);
       this.seeded = true;
     } else {
       for (let b = 0; b < this.reds.length; b++) {
         const v = this.reds[b];
         this.bmin[b] = Math.min(v, this.bmin[b] + LEAK);
         this.bmax[b] = Math.max(v, this.bmax[b] - LEAK);
+        const l = this.lums[b];
+        this.lmin[b] = Math.min(l, this.lmin[b] + LEAK);
+        this.lmax[b] = Math.max(l, this.lmax[b] - LEAK);
       }
     }
 
-    const scoreOf = (b: number) => this.bmax[b] + BLINK_WEIGHT * (this.bmax[b] - this.bmin[b]);
+    // Steady redness counts, and so does blinking of either signal. Steady
+    // brightness never does - that was the original mistake.
+    const scoreOf = (b: number) => {
+      const redScore = this.bmax[b] + BLINK_WEIGHT * (this.bmax[b] - this.bmin[b]);
+      const lumBlink = (this.lmax[b] - this.lmin[b]) * BLINK_WEIGHT;
+      return redScore > lumBlink ? redScore : lumBlink;
+    };
 
     const curBlock = (Math.floor(this.cy) >> 3) * COLS + (Math.floor(this.cx) >> 3);
     const curScore = scoreOf(curBlock);
@@ -263,10 +289,13 @@ export class SpotTracker {
       // Only move for a candidate that is both genuinely red and convincingly
       // better, and that keeps winning. One good frame is not enough; that is
       // what made the circle jump around.
+      const credible = (b: number) =>
+        this.bmax[b] >= MIN_RED || this.lmax[b] - this.lmin[b] >= MIN_RED;
+
       const worthMoving =
         best >= 0 &&
         best !== curBlock &&
-        this.bmax[best] >= MIN_RED &&
+        credible(best) &&
         bestScore > Math.max(curScore * STEAL, MIN_RED);
 
       if (worthMoving) {
@@ -276,11 +305,12 @@ export class SpotTracker {
           this.rivalFrames = 1;
         }
         // If we hold nothing at all, take the first credible candidate at once.
-        const holdingNothing = this.bmax[curBlock] < MIN_RED;
+        const holdingNothing = !credible(curBlock);
         if (this.rivalFrames >= (holdingNothing ? 2 : SWITCH_FRAMES)) {
           this.cx = ((best % COLS) + 0.5) * BLOCK;
           this.cy = (Math.floor(best / COLS) + 0.5) * BLOCK;
           this.history = [];
+          this.lumHistory = [];
           this.rivalBlock = -1;
           this.rivalFrames = 0;
         }
@@ -293,6 +323,7 @@ export class SpotTracker {
     // ---- measure at the tracked point -------------------------------------
     const R = 7;
     let red = 0;
+    let lum = 0;
     let px = this.cx;
     let py = this.cy;
     const x0 = Math.max(0, Math.round(this.cx) - R);
@@ -302,29 +333,52 @@ export class SpotTracker {
     for (let y = y0; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
         const i = (y * W + x) << 2;
-        const excess = d[i] - (d[i + 1] > d[i + 2] ? d[i + 1] : d[i + 2]);
+        const r = d[i];
+        const g = d[i + 1];
+        const b = d[i + 2];
+        const excess = r - (g > b ? g : b);
         if (excess > red) {
           red = excess;
           px = x;
           py = y;
         }
+        const l = r > g ? (r > b ? r : b) : g > b ? g : b;
+        if (l > lum) lum = l;
       }
     }
 
+    const band = (h: number[]) => {
+      const s = [...h].sort((a, b) => a - b);
+      const lo = s[Math.floor(s.length * 0.1)] ?? 0;
+      const hi = s[Math.floor(s.length * 0.9)] ?? 0;
+      return { lo, hi, range: hi - lo };
+    };
+
     this.history.push(red);
     if (this.history.length > HISTORY) this.history.shift();
-    const sorted = [...this.history].sort((a, b) => a - b);
-    const low = sorted[Math.floor(sorted.length * 0.1)] ?? 0;
-    const high = sorted[Math.floor(sorted.length * 0.9)] ?? 0;
-    const range = high - low;
+    this.lumHistory.push(lum);
+    if (this.lumHistory.length > HISTORY) this.lumHistory.shift();
+
+    const redBand = band(this.history);
+    const lumBand = band(this.lumHistory);
+
+    // Decide bits on whichever signal is actually swinging. Redness is the
+    // better discriminator and wins ties, but a clipped white-hot dot only
+    // shows up in luminance, and then that is what has to be used.
+    const useLum = lumBand.range > redBand.range * 1.5 && redBand.range < 10;
+    const value = useLum ? lum : red;
+    const chosen = useLum ? lumBand : redBand;
+    const low = chosen.lo;
+    const high = chosen.hi;
+    const range = chosen.range;
 
     if (range >= 10) {
       const hi = low + range * 0.6;
       const lo = low + range * 0.4;
-      if (red >= hi) this.level = 1;
-      else if (red <= lo) this.level = 0;
+      if (value >= hi) this.level = 1;
+      else if (value <= lo) this.level = 0;
     } else {
-      // Not blinking yet: steady red means the beam is simply on.
+      // Not blinking yet: steady red means the beam is simply sitting on.
       this.level = red >= MIN_RED ? 1 : this.level;
     }
 
@@ -335,7 +389,10 @@ export class SpotTracker {
       this.cy += (py - this.cy) * 0.2;
     }
 
-    const spotFound = this.bmax[curBlock] >= MIN_RED || red >= MIN_RED;
+    const spotFound =
+      this.bmax[curBlock] >= MIN_RED ||
+      red >= MIN_RED ||
+      this.lmax[curBlock] - this.lmin[curBlock] >= MIN_RED;
     this.lockScore = Math.round(Math.max(curScore, red));
     this.roi = { cx: this.cx / W, cy: this.cy / H, r: 0.075 };
 
