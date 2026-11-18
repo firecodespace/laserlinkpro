@@ -34,6 +34,17 @@ export class LaserDecoder {
   private nextStart = 0;
   private bytes: number[] = [];
 
+  // Glitch filter. A single mis-read video frame would otherwise chop a run
+  // in half, and the preamble guard would never be recognised. A level change
+  // is only believed once `confirmSamples` samples in a row agree, but the
+  // edge is timestamped at the FIRST of them so the bit clock stays aligned.
+  private pendLevel: 0 | 1 | null = null;
+  private pendSince = 0;
+  private pendCount = 0;
+
+  /** Bytes whose start or stop bit was misread but which CRC-8 still judged. */
+  framingErrors = 0;
+
   constructor(bitMs: number) {
     this.bitMs = bitMs;
   }
@@ -47,9 +58,12 @@ export class LaserDecoder {
   reset() {
     this.mode = 'HUNT';
     this.bytes = [];
+    this.framingErrors = 0;
     this.curLevel = null;
     this.lastOffMs = 0;
     this.lastOffEndedAt = -1;
+    this.pendLevel = null;
+    this.pendCount = 0;
   }
 
   get locked() {
@@ -65,12 +79,48 @@ export class LaserDecoder {
     if (this.curLevel === null) {
       this.curLevel = v;
       this.curStart = t;
-    } else if (v !== this.curLevel) {
-      this.onRunEnd(this.curLevel, this.curStart, t);
-      this.curLevel = v;
-      this.curStart = t;
+    } else if (v === this.curLevel) {
+      this.pendLevel = null;
+      this.pendCount = 0;
+    } else {
+      if (this.pendLevel === v) {
+        this.pendCount++;
+      } else {
+        this.pendLevel = v;
+        this.pendCount = 1;
+        this.pendSince = t;
+      }
+      if (this.pendCount >= this.confirmSamples()) {
+        this.onRunEnd(this.curLevel, this.curStart, this.pendSince);
+        this.curLevel = v;
+        this.curStart = this.pendSince;
+        this.pendLevel = null;
+        this.pendCount = 0;
+      }
     }
     this.drainBytes(t);
+  }
+
+  /** Mean gap between the most recent samples, i.e. one over the frame rate. */
+  private sampleIntervalMs(): number {
+    const n = this.buf.length;
+    if (n < 6) return 33;
+    const span = this.buf[n - 1].t - this.buf[n - 6].t;
+    return span > 0 ? span / 5 : 33;
+  }
+
+  /**
+   * Require two agreeing samples when the camera gives us enough of them,
+   * otherwise fall back to one - below three samples per bit a two-sample
+   * filter would swallow real bits.
+   */
+  private confirmSamples(): number {
+    return this.bitMs / this.sampleIntervalMs() >= 3 ? 2 : 1;
+  }
+
+  /** Samples per bit the camera is currently delivering. */
+  get samplesPerBit(): number {
+    return this.bitMs / this.sampleIntervalMs();
   }
 
   /** A run of constant level just finished: [start, end) at level `level`. */
@@ -101,21 +151,27 @@ export class LaserDecoder {
   /** Decode as many whole bytes as the buffered samples allow. */
   private drainBytes(now: number) {
     const b = this.bitMs;
-    const margin = Math.max(b * 0.3, 8);
+    const margin = Math.max(b * 0.45, 8);
     while (this.mode === 'BYTES' && now >= this.nextStart + 9.5 * b + margin) {
       const ts = this.nextStart;
 
-      if (this.levelAt(ts + 0.5 * b) !== 0) {
-        this.abort(now, 'no start bit');
-        return;
-      }
+      const startOk = this.levelAt(ts + 0.5 * b) === 0;
       let byte = 0;
       for (let i = 0; i < 8; i++) {
         if (this.levelAt(ts + (1.5 + i) * b) === 1) byte |= 1 << i;
       }
-      if (this.levelAt(ts + 9.5 * b) !== 1) {
-        this.abort(now, 'no stop bit');
-        return;
+      const stopOk = this.levelAt(ts + 9.5 * b) === 1;
+
+      // While still reading the two header bytes a framing error means we
+      // never really had a frame, so give up and hunt again. Once the header
+      // has matched we keep going and let CRC-8 be the judge: a stop bit
+      // misread by one video frame should not throw away a good message.
+      if (!startOk || !stopOk) {
+        if (this.bytes.length < 2) {
+          this.abort(now, startOk ? 'no stop bit' : 'no start bit');
+          return;
+        }
+        this.framingErrors++;
       }
 
       if (!this.acceptByte(byte, now)) return;
@@ -166,18 +222,27 @@ export class LaserDecoder {
     this.lastOffEndedAt = -1;
   }
 
-  /** Majority vote of every sample within +/- 0.3 bit of time `t`. */
+  /**
+   * Majority vote of every sample within +/- 0.4 bit of time `t`. Wide enough
+   * that three samples usually fall inside it, so one bad frame is outvoted,
+   * but still short of the neighbouring bit centres.
+   */
   private levelAt(t: number): 0 | 1 {
-    const w = Math.max(this.bitMs * 0.3, 8);
+    // Triangular weighting across the whole bit: a sample sitting on the bit
+    // centre counts fully, one out at the bit boundary counts for almost
+    // nothing. This uses every sample the bit got instead of just the one or
+    // two nearest the centre, which matters a lot at 3 samples per bit.
+    const reach = Math.max(this.bitMs * 0.6, 12);
     let ones = 0;
     let zeros = 0;
     let nearest: Sample | null = null;
     let nearestD = Infinity;
     for (const s of this.buf) {
       const d = Math.abs(s.t - t);
-      if (d <= w) {
-        if (s.v) ones++;
-        else zeros++;
+      if (d < reach) {
+        const weight = 1 - d / reach;
+        if (s.v) ones += weight;
+        else zeros += weight;
       }
       if (d < nearestD) {
         nearestD = d;
