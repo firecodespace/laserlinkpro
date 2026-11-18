@@ -146,6 +146,12 @@ void sendMessage(const String &textIn) {
   for (uint8_t i = 0; i <= len; i++) sendByte(body[i]);   // LEN + payload
   sendByte(crc);
 
+  // Hold the idle level for a few bit times before honouring #OFF. Without
+  // this the beam goes dark the instant the last stop bit ends, and the
+  // receiver samples that stop bit against an already dark line. Matches the
+  // trailing segment in frameToSegments() in lib/protocol.ts.
+  hold(true, (unsigned long)bitMs * 4);
+
   laserWrite(laserIdleOn);
   Serial.println(F("TX done"));
 }

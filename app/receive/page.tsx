@@ -70,7 +70,7 @@ export default function ReceivePage() {
           <h2>Signal</h2>
           <p className="sub">Red means the decoder currently reads the spot as ON.</p>
           <canvas ref={rx.scopeRef} className="scope" />
-          <div className="grid cols-3" style={{ marginTop: 14 }}>
+          <div className="grid cols-2" style={{ marginTop: 14 }}>
             <div className="stat">
               <div className="k">Camera fps</div>
               <div
@@ -84,6 +84,17 @@ export default function ReceivePage() {
               <div className="k">Contrast</div>
               <div className="v" style={{ color: rx.range < 12 ? 'var(--warn)' : 'var(--ok)' }}>
                 {rx.range}
+              </div>
+            </div>
+            <div className="stat">
+              <div className="k">Samples/bit</div>
+              <div
+                className="v"
+                style={{
+                  color: rx.fps > 0 && (rx.fps * bitMs) / 1000 < 3 ? 'var(--bad)' : 'var(--ok)',
+                }}
+              >
+                {((rx.fps * bitMs) / 1000).toFixed(1)}
               </div>
             </div>
             <div className="stat">

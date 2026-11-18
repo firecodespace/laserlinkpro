@@ -131,11 +131,6 @@ export class LaserDecoder {
     return this.bitMs / this.sampleIntervalMs() >= 3 ? 2 : 1;
   }
 
-  /** Samples per bit the camera is currently delivering. */
-  get samplesPerBit(): number {
-    return this.bitMs / this.sampleIntervalMs();
-  }
-
   /** A run of constant level just finished: [start, end) at level `level`. */
   private onRunEnd(level: 0 | 1, start: number, end: number) {
     const dur = end - start;
@@ -155,10 +150,6 @@ export class LaserDecoder {
       this.nextStart = end; // this falling edge is the first start bit
       this.onEvent?.({ kind: 'sync', t: end });
     }
-  }
-
-  private lastT(): number {
-    return this.buf.length ? this.buf[this.buf.length - 1].t : 0;
   }
 
   /** Decode as many whole bytes as the buffered samples allow. */

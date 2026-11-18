@@ -334,12 +334,24 @@ function ReceiverView({
                 </div>
               </div>
               <div className="stat">
-                <div className="k">Messages</div>
-                <div className="v">{rx.messages.length}</div>
+                <div className="k">Samples/bit</div>
+                <div
+                  className="v"
+                  style={{
+                    color:
+                      rx.fps > 0 && (rx.fps * bitMs) / 1000 < 3 ? 'var(--bad)' : 'var(--ok)',
+                  }}
+                >
+                  {((rx.fps * bitMs) / 1000).toFixed(1)}
+                </div>
               </div>
             </div>
 
             <canvas ref={rx.scopeRef} className="scope" style={{ marginTop: 12 }} />
+            <p className="hint" style={{ marginTop: 8 }}>
+              Samples per bit is the one number that decides whether this works. Below 3 the
+              camera cannot see the bits at all - raise the bit time until it is 3 or more.
+            </p>
             {rx.error && (
               <p className="hint" style={{ marginTop: 8, color: 'var(--bad)' }}>
                 {rx.error}
