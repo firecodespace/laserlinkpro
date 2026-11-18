@@ -70,6 +70,19 @@ export class LaserDecoder {
     return this.mode === 'BYTES';
   }
 
+  /** Bytes of the current frame recovered so far. */
+  get byteCount(): number {
+    return this.bytes.length;
+  }
+
+  /**
+   * Total bytes this frame will have, once the length byte has arrived.
+   * -1 while that is still unknown, so the UI can show an indeterminate bar.
+   */
+  get expectedBytes(): number {
+    return this.bytes.length >= 3 ? 3 + this.bytes[2] + 1 : -1;
+  }
+
   /** Feed one camera sample. Call once per video frame. */
   push(t: number, v: 0 | 1) {
     this.buf.push({ t, v });
