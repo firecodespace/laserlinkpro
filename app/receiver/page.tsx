@@ -6,7 +6,7 @@ import { useLaserReceiver } from '../../lib/useLaserReceiver';
 
 const STATE_TEXT: Record<string, { label: string; cls: string }> = {
   off: { label: 'camera off', cls: 'off' },
-  searching: { label: 'looking for the beam', cls: 'warn live' },
+  searching: { label: 'no red spot - tap it', cls: 'warn live' },
   tracking: { label: 'locked on the beam', cls: 'on' },
   receiving: { label: 'receiving a message', cls: 'on live' },
 };
@@ -31,8 +31,8 @@ export default function ReceiverPage() {
     <>
       <h1 className="page">Receiver</h1>
       <p className="lede">
-        Point the camera at the laser spot on the paper. It finds the beam, locks on and decodes
-        by itself - there is nothing to adjust.
+        Point the camera at the laser spot on the paper. It looks for red, not for bright, so a
+        lamp or white paper will not fool it. If it picks the wrong thing, just tap the dot.
       </p>
 
       {/*
@@ -41,7 +41,15 @@ export default function ReceiverPage() {
         rendering it only once the camera is running is a deadlock, because
         the ref is still null at the moment the stream arrives.
       */}
-      <div className="videoWrap">
+      <div
+        className="videoWrap"
+        onClick={(e) => {
+          if (!rx.cameraOn) return;
+          const r = e.currentTarget.getBoundingClientRect();
+          rx.pinTo((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+        }}
+        style={{ cursor: rx.cameraOn ? 'crosshair' : 'default' }}
+      >
         <video ref={rx.videoRef} playsInline muted />
         <canvas ref={rx.overlayRef} className="overlay" />
         {rx.cameraOn ? (
@@ -50,6 +58,12 @@ export default function ReceiverPage() {
               <span className="dot" />
               {s.label}
             </span>
+            {rx.manual && (
+              <span className="pill">
+                <span className="dot" />
+                pinned by tap
+              </span>
+            )}
           </div>
         ) : (
           <div className="videoCover">
@@ -100,12 +114,26 @@ export default function ReceiverPage() {
               </div>
             </div>
             <div className="stat">
-              <div className="k">Lock</div>
-              <div className="v" style={{ color: rx.locked ? 'var(--ok)' : 'var(--muted)' }}>
-                {rx.lockScore}
+              <div className="k">Redness</div>
+              <div className="v" style={{ color: rx.red >= 20 ? 'var(--ok)' : 'var(--bad)' }}>
+                {rx.red}
               </div>
             </div>
           </div>
+
+          {!rx.locked && (
+            <p className="hint" style={{ marginTop: 10, color: 'var(--warn)' }}>
+              No red spot found yet. <b>Tap the dot in the picture</b> to pin it. If redness stays
+              under 20, dim the room or move closer - the camera has to see the dot as red, not
+              just bright.
+            </p>
+          )}
+          {rx.saturated && (
+            <p className="hint" style={{ marginTop: 10, color: 'var(--warn)' }}>
+              The spot is blown out to white, so it has no colour left to detect. Dim the room or
+              angle the phone further off the beam.
+            </p>
+          )}
 
           <canvas ref={rx.scopeRef} className="scope" style={{ marginTop: 12 }} />
         </>
@@ -137,7 +165,12 @@ export default function ReceiverPage() {
           ))}
         </div>
         <div className="row" style={{ marginTop: 10 }}>
-          {rx.cameraOn && <button onClick={rx.reacquire}>Re-acquire</button>}
+          {rx.cameraOn &&
+            (rx.manual ? (
+              <button onClick={rx.resumeAuto}>Back to auto</button>
+            ) : (
+              <button onClick={rx.reacquire}>Re-acquire</button>
+            ))}
           <button onClick={() => rx.runSelfTest()}>Test without hardware</button>
           {rx.messages.length > 0 && (
             <button className="ghost" onClick={rx.clear}>
@@ -166,9 +199,16 @@ export default function ReceiverPage() {
           reads 3 or more.
           <br />
           <br />
-          <b>Lock</b> is how strongly the tracked spot is blinking. The tracker follows whatever
-          part of the picture changes the most, which is why a lamp or a reflection cannot steal
-          it. Press <b>Re-acquire</b> if it ever settles on the wrong thing.
+          <b>Redness</b> is <code>R - max(G, B)</code> at the tracked spot. This is measured
+          instead of brightness on purpose: white paper is bright in all three channels, so a
+          brightness search cannot tell the paper from the dot, while red excess is near zero for
+          white, grey or black and high only where the laser is. Anything from about 20 up is
+          usable.
+          <br />
+          <br />
+          The tracker scores every part of the picture on how red it is plus how much that
+          redness blinks, and only switches when a rival wins several frames running. If it still
+          picks the wrong thing, <b>tap the dot</b> to pin it by hand.
         </p>
 
         {rx.cameraOn && rx.cameraNotes.length > 0 && (

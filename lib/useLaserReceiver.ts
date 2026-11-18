@@ -50,6 +50,9 @@ export function useLaserReceiver(bitMs: number) {
   const [range, setRange] = useState(0);
   const [lockScore, setLockScore] = useState(0);
   const [locked, setLocked] = useState(false);
+  const [red, setRed] = useState(0);
+  const [manual, setManual] = useState(false);
+  const [saturated, setSaturated] = useState(false);
   const [decoding, setDecoding] = useState(false);
   const [progress, setProgress] = useState({ got: 0, total: -1 });
   const [error, setError] = useState('');
@@ -158,7 +161,7 @@ export function useLaserReceiver(bitMs: number) {
       if (info) {
         const dec = decoderRef.current;
         dec.push(now, info.level);
-        tunerRef.current.nudge(info.peak, now);
+        tunerRef.current.nudge(info.red, info.saturated, now);
 
         traceRef.current.push(info.level);
         if (traceRef.current.length > 400) traceRef.current.shift();
@@ -166,11 +169,14 @@ export function useLaserReceiver(bitMs: number) {
         fpsRef.current.push(now);
         while (fpsRef.current.length && now - fpsRef.current[0] > 1000) fpsRef.current.shift();
 
-        lockedRef.current = info.locked;
+        lockedRef.current = info.spotFound;
         setFps(fpsRef.current.length);
         setRange(Math.round(info.range));
-        setLockScore(Math.round(info.lockScore));
-        setLocked(info.locked);
+        setRed(Math.round(info.red));
+        setLockScore(info.lockScore);
+        setLocked(info.spotFound);
+        setManual(info.manual);
+        setSaturated(info.saturated);
         setProgress({ got: dec.byteCount, total: dec.expectedBytes });
       }
       drawOverlay();
@@ -232,6 +238,19 @@ export function useLaserReceiver(bitMs: number) {
   const reacquire = useCallback(() => {
     trackerRef.current.reset();
     decoderRef.current.reset();
+    setManual(false);
+  }, []);
+
+  /** Tap on the video: pin the spot by hand, in normalised coordinates. */
+  const pinTo = useCallback((nx: number, ny: number) => {
+    trackerRef.current.pinTo(nx, ny);
+    decoderRef.current.reset();
+    setManual(true);
+  }, []);
+
+  const resumeAuto = useCallback(() => {
+    trackerRef.current.resumeAuto();
+    setManual(false);
   }, []);
 
   const runSelfTest = useCallback(
@@ -271,6 +290,9 @@ export function useLaserReceiver(bitMs: number) {
     range,
     lockScore,
     locked,
+    red,
+    manual,
+    saturated,
     decoding,
     progress,
     error,
@@ -279,6 +301,8 @@ export function useLaserReceiver(bitMs: number) {
     start,
     stop,
     reacquire,
+    pinTo,
+    resumeAuto,
     runSelfTest,
     clear,
   };
