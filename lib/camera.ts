@@ -65,16 +65,49 @@ type ExtendedCaps = MediaTrackCapabilities & {
   exposureCompensation?: Range;
   whiteBalanceMode?: string[];
   focusMode?: string[];
+  focusDistance?: Range;
+  pointsOfInterest?: unknown;
+  zoom?: Range;
 };
 
 /* ------------------------------------------------------------------ tuner */
 
+export type CamCaps = {
+  exposure: boolean;
+  exposureCompensation: boolean;
+  focus: boolean;
+  focusDistance: boolean;
+  pointsOfInterest: boolean;
+  zoom: boolean;
+};
+
+/**
+ * Wraps the camera controls the browser exposes. Everything here is optional:
+ * phones differ wildly in what they allow, so each control is probed first
+ * and the UI only offers what actually exists.
+ *
+ * `auto` is the master switch. While it is on the exposure creeps toward a
+ * usable dot by itself; the moment the user moves a slider it turns off and
+ * nothing is changed behind their back again.
+ */
 export class CameraTuner {
   private track: MediaStreamTrack | null = null;
   private caps: ExtendedCaps | null = null;
-  private exposureFrac = 0.1;
   private lastNudge = 0;
+
+  auto = true;
+  exposureFrac = 0.12;
+  zoomFrac = 0;
+  focusFrac = 0;
   notes: string[] = [];
+  supports: CamCaps = {
+    exposure: false,
+    exposureCompensation: false,
+    focus: false,
+    focusDistance: false,
+    pointsOfInterest: false,
+    zoom: false,
+  };
 
   async attach(track: MediaStreamTrack) {
     this.track = track;
@@ -83,14 +116,23 @@ export class CameraTuner {
     } catch {
       this.caps = null;
     }
+    const c = this.caps;
+    this.supports = {
+      exposure: Boolean(c?.exposureTime && c?.exposureMode?.includes('manual')),
+      exposureCompensation: Boolean(c?.exposureCompensation),
+      focus: Boolean(c?.focusMode && c.focusMode.length > 0),
+      focusDistance: Boolean(c?.focusDistance),
+      pointsOfInterest: Boolean(c?.pointsOfInterest),
+      zoom: Boolean(c?.zoom),
+    };
     await this.applyBaseline();
   }
 
-  private async tryApply(c: Record<string, unknown>, label: string) {
+  private async tryApply(c: Record<string, unknown>, label?: string) {
     if (!this.track) return false;
     try {
       await this.track.applyConstraints({ advanced: [c] } as unknown as MediaTrackConstraints);
-      this.notes.push(label);
+      if (label) this.notes.push(label);
       return true;
     } catch {
       return false;
@@ -98,51 +140,93 @@ export class CameraTuner {
   }
 
   private async applyBaseline() {
-    const caps = this.caps;
     this.notes = [];
-    if (!caps) {
+    const c = this.caps;
+    if (!c) {
       this.notes.push('no manual camera controls on this device');
       return;
     }
-    // A short exposure darkens the paper while the laser stays bright, which
-    // both raises contrast and stops the dot blowing out to white - a
-    // saturated core reads R=G=B=255 and has no red excess at all.
-    if (caps.exposureMode?.includes('manual') && caps.exposureTime) {
-      await this.setExposureFrac(this.exposureFrac);
-    } else if (caps.exposureCompensation) {
-      await this.tryApply({ exposureCompensation: caps.exposureCompensation.min }, 'exposure down');
-    }
-    if (caps.whiteBalanceMode?.includes('manual')) {
+    if (this.supports.exposure) await this.setExposureFrac(this.exposureFrac, true);
+    else if (this.supports.exposureCompensation && c.exposureCompensation)
+      await this.tryApply({ exposureCompensation: c.exposureCompensation.min }, 'exposure down');
+    if (c.whiteBalanceMode?.includes('manual'))
       await this.tryApply({ whiteBalanceMode: 'manual' }, 'white balance locked');
-    }
-    if (caps.focusMode?.includes('continuous')) {
+    if (c.focusMode?.includes('continuous'))
       await this.tryApply({ focusMode: 'continuous' }, 'autofocus');
-    }
     if (this.notes.length === 0) this.notes.push('software detection only');
   }
 
-  private async setExposureFrac(frac: number) {
-    const et = this.caps?.exposureTime;
-    if (!et) return false;
-    this.exposureFrac = Math.min(0.9, Math.max(0.02, frac));
-    const value = et.min + (et.max - et.min) * this.exposureFrac;
-    return this.tryApply({ exposureMode: 'manual', exposureTime: value }, 'exposure fixed');
+  private lerp(r: Range | undefined, frac: number) {
+    if (!r) return 0;
+    return r.min + (r.max - r.min) * Math.min(1, Math.max(0, frac));
   }
 
-  get canAdjustExposure() {
-    return Boolean(this.caps?.exposureTime && this.caps?.exposureMode?.includes('manual'));
+  /** 0 = darkest the camera allows, 1 = brightest. */
+  async setExposureFrac(frac: number, keepAuto = false) {
+    if (!keepAuto) this.auto = false;
+    this.exposureFrac = Math.min(1, Math.max(0, frac));
+    const c = this.caps;
+    if (this.supports.exposure && c?.exposureTime) {
+      return this.tryApply({
+        exposureMode: 'manual',
+        exposureTime: this.lerp(c.exposureTime, this.exposureFrac),
+      });
+    }
+    if (this.supports.exposureCompensation && c?.exposureCompensation) {
+      return this.tryApply({
+        exposureCompensation: this.lerp(c.exposureCompensation, this.exposureFrac),
+      });
+    }
+    return false;
   }
 
-  /** Back off if the dot saturates, open up if nothing red is visible. */
+  async setZoomFrac(frac: number) {
+    this.zoomFrac = Math.min(1, Math.max(0, frac));
+    const c = this.caps;
+    if (!this.supports.zoom || !c?.zoom) return false;
+    return this.tryApply({ zoom: this.lerp(c.zoom, this.zoomFrac) });
+  }
+
+  async setFocusFrac(frac: number) {
+    this.focusFrac = Math.min(1, Math.max(0, frac));
+    const c = this.caps;
+    if (!this.supports.focusDistance || !c?.focusDistance) return false;
+    return this.tryApply({ focusMode: 'manual', focusDistance: this.lerp(c.focusDistance, this.focusFrac) });
+  }
+
+  /** Tap to focus. Normalised coordinates, as the tap arrived. */
+  async focusAt(nx: number, ny: number) {
+    const c = this.caps;
+    let ok = false;
+    if (this.supports.pointsOfInterest) {
+      ok = await this.tryApply({ pointsOfInterest: [{ x: nx, y: ny }] });
+    }
+    if (c?.focusMode?.includes('single-shot')) {
+      ok = (await this.tryApply({ focusMode: 'single-shot' })) || ok;
+    } else if (c?.focusMode?.includes('continuous')) {
+      ok = (await this.tryApply({ focusMode: 'continuous' })) || ok;
+    }
+    return ok;
+  }
+
+  async restoreAuto() {
+    this.auto = true;
+    const c = this.caps;
+    if (c?.exposureMode?.includes('continuous'))
+      await this.tryApply({ exposureMode: 'continuous' });
+    if (c?.focusMode?.includes('continuous')) await this.tryApply({ focusMode: 'continuous' });
+  }
+
+  /** Only ever runs while auto is on. */
   nudge(red: number, saturated: boolean, now: number) {
-    if (!this.canAdjustExposure) return;
+    if (!this.auto || !this.supports.exposure) return;
     if (now - this.lastNudge < 1500) return;
     if (saturated) {
       this.lastNudge = now;
-      void this.setExposureFrac(this.exposureFrac * 0.7);
+      void this.setExposureFrac(this.exposureFrac * 0.7, true);
     } else if (red < MIN_RED) {
       this.lastNudge = now;
-      void this.setExposureFrac(this.exposureFrac * 1.3);
+      void this.setExposureFrac(Math.min(1, this.exposureFrac * 1.3 + 0.01), true);
     }
   }
 }

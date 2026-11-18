@@ -38,7 +38,7 @@ export const PREAMBLE_OFF_MS = 500;
  * mistake the beacon for the start of a frame.
  */
 export const BEACON_BLINK_MS = 200;
-export const DEFAULT_BEACON_MS = 4000;
+export const DEFAULT_BEACON_MS = 6000;
 export const MAX_BEACON_MS = 15000;
 
 /** Length of the guard ON period that ends the preamble. */

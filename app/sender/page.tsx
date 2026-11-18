@@ -9,7 +9,9 @@ const BEACON_OPTIONS = [
   { ms: 2000, label: '2 s' },
   { ms: 4000, label: '4 s' },
   { ms: 6000, label: '6 s' },
+  { ms: 8000, label: '8 s' },
   { ms: 10000, label: '10 s' },
+  { ms: 15000, label: '15 s' },
 ];
 
 export default function SenderPage() {
@@ -24,11 +26,14 @@ export default function SenderPage() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [tx.outgoing, tx.phase]);
 
-  // Keep the Uno's bit time in step with the dropdown once connected.
+  // Push both settings to the Uno as soon as the link is up, and whenever
+  // they change, so the countdown on screen matches what the laser does.
   useEffect(() => {
-    if (tx.ready) void tx.sendCommand('#BIT=' + bitMs);
+    if (!tx.ready) return;
+    void tx.sendCommand('#BIT=' + bitMs);
+    void tx.sendCommand('#BEACON=' + tx.beaconMs);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bitMs, tx.ready]);
+  }, [bitMs, tx.ready, tx.beaconMs]);
 
   function submit(e: FormEvent) {
     e.preventDefault();

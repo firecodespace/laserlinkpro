@@ -31,6 +31,12 @@ type VideoWithCallback = HTMLVideoElement & {
 
 export type LinkState = 'off' | 'searching' | 'tracking' | 'receiving';
 
+/** One line of the live decode trace shown on the receiver. */
+export type RxEvent = { id: number; t: number; kind: string; text: string };
+
+const printable = (b: number) => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.');
+const hex2 = (b: number) => b.toString(16).padStart(2, '0').toUpperCase();
+
 export function useLaserReceiver(bitMs: number) {
   const videoRef = useRef<VideoWithCallback | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
@@ -58,6 +64,19 @@ export function useLaserReceiver(bitMs: number) {
   const [error, setError] = useState('');
   const [cameraNotes, setCameraNotes] = useState<string[]>([]);
   const [messages, setMessages] = useState<ReceivedMessage[]>([]);
+  const [events, setEvents] = useState<RxEvent[]>([]);
+  const [partial, setPartial] = useState<number[]>([]);
+  const [camSupports, setCamSupports] = useState(tunerRef.current.supports);
+  const [camAuto, setCamAuto] = useState(true);
+  const [exposure, setExposureState] = useState(0.12);
+  const [zoom, setZoomState] = useState(0);
+  const evIdRef = useRef(1);
+
+  const pushEvent = useCallback((kind: string, text: string) => {
+    setEvents((prev) =>
+      [...prev, { id: evIdRef.current++, t: Date.now(), kind, text }].slice(-80),
+    );
+  }, []);
 
   const addMessage = useCallback((m: Omit<ReceivedMessage, 'id'>) => {
     setMessages((prev) => [...prev, { ...m, id: idRef.current++ }].slice(-60));
@@ -66,10 +85,41 @@ export function useLaserReceiver(bitMs: number) {
   useEffect(() => {
     const dec = decoderRef.current;
     dec.onEvent = (e: DecodeEvent) => {
-      if (e.kind === 'sync') setDecoding(true);
-      if (e.kind === 'abort') setDecoding(false);
+      if (e.kind === 'sync') {
+        setDecoding(true);
+        setPartial([]);
+        pushEvent('sync', 'preamble locked - reading bytes');
+      }
+      if (e.kind === 'byte') {
+        setPartial((prev) => [...prev, e.value]);
+        const label =
+          e.index === 0
+            ? 'header'
+            : e.index === 1
+              ? 'header'
+              : e.index === 2
+                ? 'length'
+                : 'data';
+        pushEvent('byte', 'byte ' + e.index + '  0x' + hex2(e.value) + "  '" + printable(e.value) + "'  " + label);
+      }
+      if (e.kind === 'abort') {
+        setDecoding(false);
+        pushEvent('abort', 'lost the frame: ' + e.reason);
+        setPartial([]);
+      }
       if (e.kind === 'frame') {
         setDecoding(false);
+        pushEvent(
+          e.frame.ok ? 'ok' : 'bad',
+          e.frame.ok
+            ? 'frame complete, CRC ok: "' + e.frame.text + '"'
+            : 'frame complete but CRC FAILED (got 0x' +
+              hex2(e.frame.crcReceived) +
+              ', expected 0x' +
+              hex2(e.frame.crcComputed) +
+              ')',
+        );
+        setPartial([]);
         addMessage({
           at: Date.now(),
           text: e.frame.text,
@@ -79,7 +129,7 @@ export function useLaserReceiver(bitMs: number) {
         });
       }
     };
-  }, [addMessage]);
+  }, [addMessage, pushEvent]);
 
   useEffect(() => {
     decoderRef.current.setBitMs(bitMs);
@@ -208,6 +258,9 @@ export function useLaserReceiver(bitMs: number) {
       if (track) {
         await tunerRef.current.attach(track);
         setCameraNotes(tunerRef.current.notes);
+        setCamSupports({ ...tunerRef.current.supports });
+        setExposureState(tunerRef.current.exposureFrac);
+        setCamAuto(tunerRef.current.auto);
       }
       trackerRef.current.reset();
       decoderRef.current.reset();
@@ -248,6 +301,26 @@ export function useLaserReceiver(bitMs: number) {
     setManual(true);
   }, []);
 
+  const setExposure = useCallback((frac: number) => {
+    setExposureState(frac);
+    setCamAuto(false);
+    void tunerRef.current.setExposureFrac(frac);
+  }, []);
+
+  const setZoom = useCallback((frac: number) => {
+    setZoomState(frac);
+    void tunerRef.current.setZoomFrac(frac);
+  }, []);
+
+  const focusAt = useCallback((nx: number, ny: number) => {
+    void tunerRef.current.focusAt(nx, ny);
+  }, []);
+
+  const restoreCameraAuto = useCallback(() => {
+    setCamAuto(true);
+    void tunerRef.current.restoreAuto();
+  }, []);
+
   const resumeAuto = useCallback(() => {
     trackerRef.current.resumeAuto();
     setManual(false);
@@ -270,7 +343,10 @@ export function useLaserReceiver(bitMs: number) {
     [addMessage, bitMs],
   );
 
-  const clear = useCallback(() => setMessages([]), []);
+  const clear = useCallback(() => {
+    setMessages([]);
+    setEvents([]);
+  }, []);
 
   const state: LinkState = !cameraOn
     ? 'off'
@@ -298,6 +374,16 @@ export function useLaserReceiver(bitMs: number) {
     error,
     cameraNotes,
     messages,
+    events,
+    partial,
+    camSupports,
+    camAuto,
+    exposure,
+    zoom,
+    setExposure,
+    setZoom,
+    focusAt,
+    restoreCameraAuto,
     start,
     stop,
     reacquire,

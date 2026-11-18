@@ -6,47 +6,51 @@ import { useLaserReceiver } from '../../lib/useLaserReceiver';
 
 const STATE_TEXT: Record<string, { label: string; cls: string }> = {
   off: { label: 'camera off', cls: 'off' },
-  searching: { label: 'no red spot - tap it', cls: 'warn live' },
+  searching: { label: 'no spot - tap it', cls: 'warn live' },
   tracking: { label: 'locked on the beam', cls: 'on' },
-  receiving: { label: 'receiving a message', cls: 'on live' },
+  receiving: { label: 'receiving', cls: 'on live' },
 };
+
+const hex2 = (b: number) => b.toString(16).padStart(2, '0').toUpperCase();
 
 export default function ReceiverPage() {
   const [bitMs, setBitMs] = useState(120);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const threadRef = useRef<HTMLDivElement | null>(null);
+  const traceRef = useRef<HTMLDivElement | null>(null);
   const rx = useLaserReceiver(bitMs);
 
   useEffect(() => {
-    const el = threadRef.current;
+    const el = traceRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [rx.messages, rx.decoding]);
+  }, [rx.events]);
 
   const s = STATE_TEXT[rx.state] ?? STATE_TEXT.off;
   const samplesPerBit = (rx.fps * bitMs) / 1000;
   const pct =
     rx.progress.total > 0 ? Math.min(100, (rx.progress.got / rx.progress.total) * 100) : 0;
+  const supported = Object.entries(rx.camSupports)
+    .filter(([, v]) => v)
+    .map(([k]) => k)
+    .join(', ');
+  const noExposureControl = !rx.camSupports.exposure && !rx.camSupports.exposureCompensation;
 
   return (
     <>
       <h1 className="page">Receiver</h1>
       <p className="lede">
-        Point the camera at the laser spot on the paper. It looks for red, not for bright, so a
-        lamp or white paper will not fool it. If it picks the wrong thing, just tap the dot.
+        Hold the phone still and point it at the laser spot. <b>Tap the spot in the picture</b> to
+        aim and focus there, then drag the brightness slider down until only the dot stands out.
       </p>
 
-      {/*
-        The video element is mounted at all times, never conditionally. It has
-        to exist in the DOM before start() can attach the MediaStream to it -
-        rendering it only once the camera is running is a deadlock, because
-        the ref is still null at the moment the stream arrives.
-      */}
+      {/* Mounted at all times: start() needs this ref before the stream exists. */}
       <div
         className="videoWrap"
         onClick={(e) => {
           if (!rx.cameraOn) return;
           const r = e.currentTarget.getBoundingClientRect();
-          rx.pinTo((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+          const nx = (e.clientX - r.left) / r.width;
+          const ny = (e.clientY - r.top) / r.height;
+          rx.pinTo(nx, ny);
+          rx.focusAt(nx, ny);
         }}
         style={{ cursor: rx.cameraOn ? 'crosshair' : 'default' }}
       >
@@ -59,9 +63,9 @@ export default function ReceiverPage() {
               {s.label}
             </span>
             {rx.manual && (
-              <span className="pill">
+              <span className="pill on">
                 <span className="dot" />
-                pinned by tap
+                aimed by tap
               </span>
             )}
           </div>
@@ -81,22 +85,6 @@ export default function ReceiverPage() {
 
       {rx.cameraOn && (
         <>
-          {rx.decoding && (
-            <div className="card" style={{ marginTop: 12 }}>
-              <div className="row" style={{ justifyContent: 'space-between' }}>
-                <b style={{ fontSize: 14 }}>Incoming message</b>
-                <span className="hint">
-                  {rx.progress.total > 0
-                    ? rx.progress.got + ' / ' + rx.progress.total + ' bytes'
-                    : 'reading header'}
-                </span>
-              </div>
-              <div className="progressbar">
-                <i style={{ width: pct + '%' }} />
-              </div>
-            </div>
-          )}
-
           <div className="statRow" style={{ marginTop: 12 }}>
             <div className="stat">
               <div className="k">fps</div>
@@ -106,45 +94,151 @@ export default function ReceiverPage() {
             </div>
             <div className="stat">
               <div className="k">Samples/bit</div>
-              <div
-                className="v"
-                style={{ color: samplesPerBit < 3 ? 'var(--bad)' : 'var(--ok)' }}
-              >
+              <div className="v" style={{ color: samplesPerBit < 3 ? 'var(--bad)' : 'var(--ok)' }}>
                 {samplesPerBit.toFixed(1)}
               </div>
             </div>
             <div className="stat">
-              <div className="k">Redness</div>
+              <div className="k">Signal</div>
               <div className="v" style={{ color: rx.red >= 20 ? 'var(--ok)' : 'var(--bad)' }}>
                 {rx.red}
               </div>
             </div>
           </div>
 
-          {!rx.locked && (
-            <p className="hint" style={{ marginTop: 10, color: 'var(--warn)' }}>
-              No red spot found yet. <b>Tap the dot in the picture</b> to pin it. If redness stays
-              under 20, dim the room or move closer - the camera has to see the dot as red, not
-              just bright.
-            </p>
-          )}
-          {rx.saturated && (
-            <p className="hint" style={{ marginTop: 10, color: 'var(--warn)' }}>
-              The spot is blown out to white, so it has no colour left to detect. Dim the room or
-              angle the phone further off the beam.
-            </p>
-          )}
-
           <canvas ref={rx.scopeRef} className="scope" style={{ marginTop: 12 }} />
+          <p className="hint" style={{ marginTop: 6 }}>
+            Red bars are the beam read as ON. If this never changes while the sender is
+            transmitting, the camera is not seeing the dot - tap it, or lower the brightness.
+          </p>
+
+          <div className="card">
+            <div className="row" style={{ justifyContent: 'space-between' }}>
+              <h2 style={{ margin: 0 }}>Camera</h2>
+              <span className={'pill ' + (rx.camAuto ? '' : 'on')}>
+                <span className="dot" />
+                {rx.camAuto ? 'auto' : 'manual'}
+              </span>
+            </div>
+
+            <label className="field" style={{ marginTop: 12 }} htmlFor="exp">
+              Brightness - drag down until only the dot is bright
+            </label>
+            <input
+              id="exp"
+              type="range"
+              min={0}
+              max={100}
+              value={Math.round(rx.exposure * 100)}
+              onChange={(e) => rx.setExposure(Number(e.target.value) / 100)}
+              disabled={noExposureControl}
+            />
+
+            {rx.camSupports.zoom && (
+              <>
+                <label className="field" style={{ marginTop: 12 }} htmlFor="zoom">
+                  Zoom
+                </label>
+                <input
+                  id="zoom"
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={Math.round(rx.zoom * 100)}
+                  onChange={(e) => rx.setZoom(Number(e.target.value) / 100)}
+                />
+              </>
+            )}
+
+            <div className="row" style={{ marginTop: 12 }}>
+              {rx.manual ? (
+                <button onClick={rx.resumeAuto}>Auto aim</button>
+              ) : (
+                <button onClick={rx.reacquire}>Re-acquire</button>
+              )}
+              {!rx.camAuto && <button onClick={rx.restoreCameraAuto}>Auto camera</button>}
+              <button onClick={rx.stop}>Stop camera</button>
+            </div>
+
+            {noExposureControl && (
+              <p className="hint" style={{ marginTop: 10, color: 'var(--warn)' }}>
+                This browser exposes no exposure control for your camera. Dim the room instead,
+                and tap the dot to aim.
+              </p>
+            )}
+            <p className="hint" style={{ marginTop: 10 }}>
+              Controls available here: {supported || 'none'}
+            </p>
+          </div>
+
+          <div className="card">
+            <div className="row" style={{ justifyContent: 'space-between' }}>
+              <h2 style={{ margin: 0 }}>What the decoder is reading</h2>
+              {rx.decoding && (
+                <span className="pill on live">
+                  <span className="dot" />
+                  {rx.progress.total > 0
+                    ? rx.progress.got + '/' + rx.progress.total + ' bytes'
+                    : 'reading header'}
+                </span>
+              )}
+            </div>
+
+            {rx.decoding && (
+              <div className="progressbar" style={{ marginTop: 10 }}>
+                <i style={{ width: pct + '%' }} />
+              </div>
+            )}
+
+            {rx.partial.length > 0 && (
+              <>
+                <label className="field" style={{ marginTop: 12 }}>
+                  Bytes so far
+                </label>
+                <div className="log" style={{ height: 'auto', maxHeight: 70 }}>
+                  <span className="rx">{rx.partial.map(hex2).join(' ')}</span>
+                </div>
+              </>
+            )}
+
+            <label className="field" style={{ marginTop: 12 }}>
+              Trace
+            </label>
+            <div className="log" ref={traceRef}>
+              {rx.events.length === 0 && (
+                <span className="sys">
+                  Nothing decoded yet. Every preamble, byte and CRC check appears here as it
+                  happens, so you can see exactly how far each attempt gets.
+                </span>
+              )}
+              {rx.events.map((e) => (
+                <div key={e.id}>
+                  <span className="t">{new Date(e.t).toLocaleTimeString()} </span>
+                  <span
+                    className={
+                      e.kind === 'ok'
+                        ? 'ok'
+                        : e.kind === 'bad' || e.kind === 'abort'
+                          ? 'err'
+                          : 'rx'
+                    }
+                  >
+                    {e.text}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
         </>
       )}
 
       <div className="card">
-        <div className="thread" ref={threadRef}>
+        <h2>Messages</h2>
+        <div className="thread">
           {rx.messages.length === 0 && (
             <div className="empty">
               {rx.cameraOn
-                ? 'Waiting for a transmission. When the sender starts, the laser blinks first - that is the beacon, and the circle will turn green once it locks on.'
+                ? 'Nothing decoded yet. Watch the trace above to see how far each attempt gets.'
                 : 'No messages yet.'}
             </div>
           )}
@@ -165,14 +259,8 @@ export default function ReceiverPage() {
           ))}
         </div>
         <div className="row" style={{ marginTop: 10 }}>
-          {rx.cameraOn &&
-            (rx.manual ? (
-              <button onClick={rx.resumeAuto}>Back to auto</button>
-            ) : (
-              <button onClick={rx.reacquire}>Re-acquire</button>
-            ))}
           <button onClick={() => rx.runSelfTest()}>Test without hardware</button>
-          {rx.messages.length > 0 && (
+          {(rx.messages.length > 0 || rx.events.length > 0) && (
             <button className="ghost" onClick={rx.clear}>
               Clear
             </button>
@@ -180,8 +268,8 @@ export default function ReceiverPage() {
         </div>
       </div>
 
-      <details className="more card" open={showAdvanced}>
-        <summary onClick={() => setShowAdvanced((s2) => !s2)}>Settings and diagnostics</summary>
+      <details className="more card">
+        <summary>Settings</summary>
         <label className="field" style={{ marginTop: 12 }} htmlFor="rbit">
           Bit time - must match the sender
         </label>
@@ -192,38 +280,19 @@ export default function ReceiverPage() {
             </option>
           ))}
         </select>
-
         <p className="hint" style={{ marginTop: 12 }}>
-          <b>Samples per bit</b> is the number that decides whether this can work at all. Below 3
-          the camera physically cannot see the bits - raise the bit time on both sides until it
-          reads 3 or more.
+          <b>Signal</b> is how strongly the tracked spot stands out, measured as red excess
+          (<code>R - max(G,B)</code>) so bright white paper scores near zero while a red laser
+          scores high. About 20 and up is usable.
           <br />
           <br />
-          <b>Redness</b> is <code>R - max(G, B)</code> at the tracked spot. This is measured
-          instead of brightness on purpose: white paper is bright in all three channels, so a
-          brightness search cannot tell the paper from the dot, while red excess is near zero for
-          white, grey or black and high only where the laser is. Anything from about 20 up is
-          usable.
-          <br />
-          <br />
-          The tracker scores every part of the picture on how red it is plus how much that
-          redness blinks, and only switches when a rival wins several frames running. If it still
-          picks the wrong thing, <b>tap the dot</b> to pin it by hand.
+          <b>Samples per bit</b> decides whether decoding is possible at all. Below 3 the camera
+          cannot see the bits - raise the bit time on both sides.
         </p>
-
-        {rx.cameraOn && rx.cameraNotes.length > 0 && (
-          <>
-            <label className="field" style={{ marginTop: 12 }}>
-              Camera controls applied
-            </label>
-            <p className="hint">{rx.cameraNotes.join(', ')}</p>
-          </>
-        )}
-
-        {rx.cameraOn && (
-          <div className="row" style={{ marginTop: 12 }}>
-            <button onClick={rx.stop}>Stop camera</button>
-          </div>
+        {rx.cameraNotes.length > 0 && (
+          <p className="hint" style={{ marginTop: 10 }}>
+            Camera: {rx.cameraNotes.join(', ')}
+          </p>
         )}
       </details>
     </>

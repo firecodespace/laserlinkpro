@@ -15,6 +15,7 @@ export type Sample = { t: number; v: 0 | 1 };
 
 export type DecodeEvent =
   | { kind: 'sync'; t: number }
+  | { kind: 'byte'; t: number; index: number; value: number }
   | { kind: 'frame'; t: number; frame: ParsedFrame }
   | { kind: 'abort'; t: number; reason: string };
 
@@ -213,6 +214,7 @@ export class LaserDecoder {
       return false;
     }
     this.bytes.push(byte);
+    this.onEvent?.({ kind: 'byte', t: now, index: i, value: byte });
 
     const len = this.bytes[2];
     if (this.bytes.length >= 3 && this.bytes.length === 3 + len + 1) {
